@@ -5,11 +5,14 @@ Playwright over CDP. No Graph API, no app registration, no admin consent, no
 tenant permissions — it uses the Teams *web* client with your own signed-in
 session.
 
+**First run — once, with a visible browser window.** You sign in yourself; the
+tool never handles credentials.
+
 ```powershell
 git clone https://github.com/RyosukeMondo/teams-browser
 cd teams-browser
 powershell -ExecutionPolicy Bypass -File .\setup.ps1 -Launch
-# sign in to Teams in the window that opens, then:
+# a Chrome window opens -- sign in to Teams there (password, MFA, all of it)
 .\teams.ps1 wait-login
 .\teams.ps1 chats
 ```
@@ -18,6 +21,20 @@ powershell -ExecutionPolicy Bypass -File .\setup.ps1 -Launch
 winget), creates the virtual environment, installs dependencies, and checks you
 have Chrome or Edge. It is safe to re-run — every step is skipped if already
 done.
+
+**Every run after that — no window on your desktop.** The sign-in is remembered
+in `./profile`, so from now on you can run it invisibly:
+
+```powershell
+.\teams.ps1 launch --headless     # no window at all
+.\teams.ps1 chats
+.\teams.ps1 shutdown              # done for now; frees the memory
+```
+
+You can close that browser at any time — clicking X, or `shutdown`. Nothing is
+lost: the session lives in `./profile`, not in the running browser, and the next
+`launch` picks it straight back up (~15 s). You will only need a visible window
+again when the session eventually expires.
 
 ---
 
