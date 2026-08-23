@@ -60,10 +60,29 @@ def cdp_version(port: int, timeout: float = 1.0):
         return None
 
 
+def profile_has_session(profile: Path = PROFILE_DIR) -> bool:
+    """Rough check that *someone has signed in with a visible window* before.
+
+    Headless Chrome cannot show a sign-in form the user can type into, so a
+    headless launch on a never-used profile would just sit on a login page.
+    A cookie store of any real size means a session was established once.
+    """
+    for rel in ("Default/Network/Cookies", "Default/Cookies"):
+        f = profile / rel
+        if f.exists() and f.stat().st_size > 20000:
+            return True
+    return False
+
+
 def launch_browser(port: int = DEFAULT_PORT, profile: Path = PROFILE_DIR,
                    prefer: str = "chrome", browser_path: str | None = None,
-                   url: str | None = None, wait: float = 30.0) -> dict:
-    """Start a debuggable browser on our own profile (no-op if already up)."""
+                   url: str | None = None, wait: float = 30.0,
+                   headless: bool = False, minimized: bool = False) -> dict:
+    """Start a debuggable browser on our own profile (no-op if already up).
+
+    `headless` needs a profile that has already been signed in interactively --
+    see profile_has_session(); the caller is expected to have checked.
+    """
     info = cdp_version(port)
     if info:
         return info
@@ -79,6 +98,9 @@ def launch_browser(port: int = DEFAULT_PORT, profile: Path = PROFILE_DIR,
         "--disable-features=Translate",
         "--remote-allow-origins=*",
     ]
+    if headless:
+        # Headless still needs a real viewport: Teams virtualises its lists.
+        args += ["--headless=new", "--window-size=1440,960"]
     if url:
         args.append(url)
 
@@ -92,13 +114,56 @@ def launch_browser(port: int = DEFAULT_PORT, profile: Path = PROFILE_DIR,
     while time.time() < deadline:
         info = cdp_version(port)
         if info:
+            if minimized and not headless:
+                _minimize_first_window(port)
             return info
         time.sleep(0.4)
     raise RuntimeError(f"Browser did not expose CDP on port {port} within {wait}s")
 
 
+def _minimize_first_window(port: int):
+    """Best-effort: tuck the freshly launched window away."""
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+            ctx = browser.contexts[0] if browser.contexts else None
+            if ctx and ctx.pages:
+                set_window_state(ctx.pages[0], "minimized")
+            browser.close()
+    except Exception:
+        pass
+
+
+def window_state(page):
+    """'normal' | 'minimized' | 'maximized' | 'fullscreen', or None if unknown."""
+    try:
+        cdp = page.context.new_cdp_session(page)
+        wid = cdp.send("Browser.getWindowForTarget")["windowId"]
+        return cdp.send("Browser.getWindowBounds", {"windowId": wid})["bounds"]["windowState"]
+    except Exception:
+        return None
+
+
+def set_window_state(page, state: str = "minimized") -> bool:
+    try:
+        cdp = page.context.new_cdp_session(page)
+        wid = cdp.send("Browser.getWindowForTarget")["windowId"]
+        cdp.send("Browser.setWindowBounds",
+                 {"windowId": wid, "bounds": {"windowState": state}})
+        return True
+    except Exception:
+        return False
+
+
 def ensure_window_size(page, width: int = 1440, height: int = 960):
-    """Teams virtualises its lists, so a small window renders few messages."""
+    """Teams virtualises its lists, so a small window renders few messages.
+
+    A minimized window is left alone: it keeps rendering at its last size, and
+    resizing it would yank it back onto the user's desktop mid-task.
+    """
+    if window_state(page) == "minimized":
+        return "minimized"
     try:
         vp = page.evaluate("() => [window.outerWidth, window.outerHeight]")
     except Exception:

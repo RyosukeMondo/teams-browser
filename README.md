@@ -42,7 +42,9 @@ Global flags go **before** the subcommand: `.\teams.ps1 --json read "Sam"`.
 
 | Command | What it does |
 | --- | --- |
-| `launch` | start a debuggable browser on this project's own profile |
+| `launch` | start a debuggable browser on this project's own profile (`--minimized`, `--headless`) |
+| `minimize` | tuck the running browser window away |
+| `shutdown` | close the browser; frees ~1.4 GB, session persists |
 | `wait-login` | block until you have signed in by hand and the chat list renders |
 | `status` | is the browser up, signed in, and which chat is open |
 | `chats` | list chat threads (`*` marks a possible unread — see caveats) |
@@ -87,6 +89,60 @@ their own profile *and* their own port:
 
 The port defaults to 9223 to stay clear of 9222, which other CDP tooling
 commonly claims.
+
+## Running it out of your way (measured, not guessed)
+
+Everything works with the window **minimized** — reads, search, and sends. CDP
+drives the page directly, so it needs neither focus nor a visible window, and
+attaching no longer yanks a minimized window back onto your desktop.
+
+```powershell
+.\teams.ps1 launch --minimized   # start tucked away
+.\teams.ps1 minimize             # tuck an already-running one away
+.\teams.ps1 shutdown             # close it; the signed-in session survives
+.\teams.ps1 launch --headless    # no window at all (see the caveat below)
+```
+
+Measured on a daily-use Windows 11 desktop, Chrome 151, same account and the
+same 16-check selftest each time:
+
+| how it runs | RAM | notes |
+| --- | --- | --- |
+| windowed, minimized | ~1.4 GB / 11 procs | full function, no desktop clutter |
+| `--headless` | ~1.3 GB / 9 procs | ~10% less — not the win you would expect |
+| not running | 0 | `shutdown`; ~15 s cold start back to a chat list |
+
+**Headless is not a footprint fix.** Teams' web client costs over a gigabyte
+however you run it. If idle RAM matters on a machine you actually work on, the
+lever is not keeping it running: `shutdown` when done and pay ~15 s on the next
+cold start. If you use it through the day, leave it minimized.
+
+### Headless cannot sign you in
+
+`--headless` refuses (exit 2) on a profile that has never been signed in, because
+headless Chrome has no window in which you could type credentials or complete
+MFA — it would sit on the login page forever. Sign in once with a real window:
+
+```powershell
+.\teams.ps1 launch
+# sign in to Teams in that window
+.\teams.ps1 wait-login
+```
+
+From then on the profile carries the session and `--headless` works. The same
+applies whenever the session expires: you need a visible window again.
+
+### What about a browser extension?
+
+A Chrome extension would ride inside the Chrome you already have open, so the
+marginal cost would be one tab rather than a second ~1.4 GB browser. That is the
+only option here that genuinely lowers the footprint, but it means building an
+extension plus a native-messaging host to reach this CLI.
+
+Pointing this tool at your *everyday* Chrome by starting it with
+`--remote-debugging-port` would avoid the second browser too — **don't**. That
+port lets any local process drive every tab you have open, banking and mail
+included. The separate profile this tool uses exists precisely to contain that.
 
 ## Sign-in
 

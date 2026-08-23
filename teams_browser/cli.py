@@ -6,7 +6,8 @@ import json
 import sys
 from pathlib import Path
 
-from .browser import DEFAULT_PORT, PROFILE_DIR, cdp_version, launch_browser, session
+from .browser import (DEFAULT_PORT, PROFILE_DIR, cdp_version, launch_browser,
+                      profile_has_session, session, set_window_state, window_state)
 from .teams import CHAT_LIST_ITEM, SEND_BUTTON, TEAMS_URL, Teams, TeamsError
 
 
@@ -17,10 +18,55 @@ def _out(obj, as_json: bool):
 
 
 def cmd_launch(a):
-    info = launch_browser(a.port, Path(a.profile), a.prefer, a.browser_path, url=a.url)
-    print("CDP up on port %d: %s" % (a.port, info.get("Browser")))
+    profile = Path(a.profile)
+    if a.launch_headless and not profile_has_session(profile):
+        msg = [
+            "Refusing to launch headless: %s has no signed-in session yet." % profile,
+            "Headless Chrome cannot show a sign-in form you can type into, so it",
+            "would just sit on the login page. Do this once with a real window:",
+            r"    .\teams.ps1 launch",
+            "    (sign in to Teams in that window)",
+            r"    .\teams.ps1 wait-login",
+            "After that, headless reuses the session.",
+        ]
+        print("\n".join(msg), file=sys.stderr)
+        return 2
+    info = launch_browser(a.port, profile, a.prefer, a.browser_path, url=a.url,
+                          headless=a.launch_headless, minimized=a.minimized)
+    how = "headless" if a.launch_headless else ("minimized" if a.minimized else "windowed")
+    print("CDP up on port %d (%s): %s" % (a.port, how, info.get("Browser")))
     print("Profile: %s" % a.profile)
-    print("Sign in to Teams in that window if needed; the session persists.")
+    if not a.launch_headless:
+        print("Sign in to Teams in that window if needed; the session persists.")
+
+
+def cmd_minimize(a):
+    with session("cdp", a.port, Path(a.profile), autostart=False) as page:
+        state = window_state(page)
+        if state is None:
+            print("no OS window to minimize (headless?)", file=sys.stderr)
+            return 1
+        if state == "minimized":
+            print("already minimized")
+            return 0
+        ok = set_window_state(page, "minimized")
+        print("minimized" if ok else "could not minimize")
+        return 0 if ok else 1
+
+
+def cmd_shutdown(a):
+    """Close the browser. Frees ~1 GB; the signed-in session survives."""
+    if not cdp_version(a.port):
+        print("nothing running on port %d" % a.port)
+        return 0
+    with session("cdp", a.port, Path(a.profile), autostart=False) as page:
+        try:
+            cdp = page.context.new_cdp_session(page)
+            cdp.send("Browser.close")
+        except Exception:
+            pass
+    print("browser closed (profile %s keeps the session)" % a.profile)
+    return 0
 
 
 def cmd_status(a):
@@ -240,7 +286,17 @@ def build_parser():
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("launch", help="start a debuggable browser on our profile")
+    s.add_argument("--headless", dest="launch_headless", action="store_true",
+                   help="no window at all; requires a profile already signed in")
+    s.add_argument("--minimized", action="store_true",
+                   help="launch windowed but tucked away (keeps sign-in possible)")
     s.set_defaults(func=cmd_launch)
+
+    s = sub.add_parser("minimize", help="tuck the browser window away")
+    s.set_defaults(func=cmd_minimize)
+
+    s = sub.add_parser("shutdown", help="close the browser (frees memory; session persists)")
+    s.set_defaults(func=cmd_shutdown)
 
     s = sub.add_parser("status", help="is the browser up and signed in?")
     s.set_defaults(func=cmd_status)

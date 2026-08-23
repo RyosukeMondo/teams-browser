@@ -44,6 +44,24 @@ Then, once — a human must be at the keyboard:
 
 Verify with `.\teams.ps1 selftest` — expect `16/16 passed`.
 
+### Keeping it out of the user's way
+
+Everything works with the window minimized, including sends; CDP needs neither
+focus nor a visible window, and attaching does not restore a minimized window.
+
+* `launch --minimized` — start tucked away.
+* `minimize` — tuck a running one away.
+* `shutdown` — close it. Frees ~1.4 GB; the session survives in the profile;
+  ~15 s cold start next time.
+* `launch --headless` — no window at all. **Exits 2 if the profile has never
+  been signed in**, because headless Chrome has no window for the human to type
+  credentials or complete MFA in. Never work around that guard: ask the human to
+  run a visible `launch` + `wait-login` once instead.
+
+Measured on a daily-use desktop: minimized ~1.4 GB, headless ~1.3 GB, not
+running 0. Headless is not a memory fix — if footprint matters, `shutdown` when
+idle and accept the cold start.
+
 ## Invocation
 
 `.\teams.ps1 <args>` wraps `.\.venv\Scripts\python.exe -X utf8 -m teams_browser`.
