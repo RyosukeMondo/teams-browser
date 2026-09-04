@@ -50,10 +50,12 @@ def render(cfg: dict, base_url: str, urls: list) -> str:
     auth = bool(cfg.get("auth"))
 
     watch_rows = "\n".join(
-        "| `%s` | `%s` | %s | %s |" % (
+        "| `%s` | `%s` | %s | %s | %s |" % (
             w.get("chat"), w.get("anchor") or "(any message)",
-            w.get("from") or "anyone", "yes" if w.get("enabled", True) else "no")
-        for w in watch) or "| _nothing watched_ | | | |"
+            w.get("from") or "anyone",
+            "included" if w.get("include_mine") else "ignored",
+            "yes" if w.get("enabled", True) else "no")
+        for w in watch) or "| _nothing watched_ | | | | |"
 
     route_rows = "\n".join(
         "| `%s` | `%s` | %s | %s |" % (m, p, "token" if a == "yes" else "open", d)
@@ -99,8 +101,8 @@ Base URL: `%(base)s`
 
 ## What is being watched
 
-| chat | anchor | from | enabled |
-| --- | --- | --- | --- |
+| chat | anchor | from | own messages | enabled |
+| --- | --- | --- | --- | --- |
 %(watch_rows)s
 
 Polled every **%(interval)s seconds**. Replies are prefixed **`%(prefix)s`**, and

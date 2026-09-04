@@ -289,8 +289,8 @@ class Watcher(threading.Thread):
             # of old "@claude" messages on startup would be a nasty surprise.
             if cursor is None or not newer(mid, cursor):
                 continue
-            if m.get("mine"):
-                continue
+            if m.get("mine") and not entry.get("include_mine"):
+                continue       # the signed-in account's own messages
             text = (m.get("text") or "").strip()
             if prefix and text.startswith(prefix):
                 continue           # our own reply, echoed back by Teams

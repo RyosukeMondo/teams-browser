@@ -92,6 +92,9 @@ def normalise_watch(entries) -> list:
             "anchor": (anchor or "").strip(),
             "from": (e.get("from") or None),
             "enabled": bool(e.get("enabled", True)),
+            # True: the signed-in account's own "@claude" messages are jobs
+            # too (self-driven use). The reply prefix still stops echo loops.
+            "include_mine": bool(e.get("include_mine", False)),
         })
     return out
 
