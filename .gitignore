@@ -3,3 +3,7 @@ profile/
 __pycache__/
 *.pyc
 out/
+# Holds the API token, and a queue of real message text. Never commit either.
+teams-interface.json
+teams-interface.state.json
+teams-interface.state.tmp

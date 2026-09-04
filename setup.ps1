@@ -163,6 +163,9 @@ Next steps:
     .\teams.ps1 wait-login    # blocks until the chat list renders
     .\teams.ps1 chats         # list your conversations
 
+To expose it on the LAN as http://teams-interface.local:8787/ :
+    .\teams-api.ps1           # prints its API token; GET / documents itself
+
 If PowerShell blocks these scripts, run them as:
     powershell -ExecutionPolicy Bypass -File .\teams.ps1 chats
 "@ -ForegroundColor Cyan

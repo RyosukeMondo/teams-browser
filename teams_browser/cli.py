@@ -266,6 +266,44 @@ def cmd_shot(a):
         return 0
 
 
+def cmd_serve(a):
+    """Run the REST bridge: teams-interface.local on the LAN."""
+    from . import config as cfgmod
+    from .api import serve
+
+    cfg = cfgmod.load(a.config)
+    # Persist the file *before* the flags are folded in: the file is the
+    # durable configuration, flags are for this run only. Without this, one
+    # `--interval 30` would quietly become the new permanent setting.
+    cfgmod.ensure_token(cfg)
+    cfgmod.save(cfg)
+
+    for key, val in (("host", a.host), ("port", a.api_port), ("hostname", a.hostname),
+                     ("interval", a.interval), ("reply_prefix", a.reply_prefix)):
+        if val is not None:
+            cfg[key] = val
+    if a.watch:
+        cfg["watch"] = cfgmod.normalise_watch(
+            [{"chat": c, "anchor": a.anchor if a.anchor is not None
+              else cfgmod.DEFAULT_ANCHOR} for c in a.watch])
+    elif a.anchor is not None:
+        for w in cfg["watch"]:
+            w["anchor"] = a.anchor
+    if a.no_mdns:
+        cfg["mdns"] = False
+    if a.no_auth:
+        cfg["auth"] = False
+    # These belong to the browser the service drives, and the global flags are
+    # how the user says which browser that is.
+    cfg["browser"]["port"] = a.port
+    cfg["browser"]["profile"] = a.profile
+    cfg["browser"]["prefer"] = a.prefer
+    cfg["browser"]["mode"] = a.mode
+    if a.headless:
+        cfg["browser"]["headless"] = True
+    return serve(cfg, quiet=a.quiet)
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog="teams", description=__doc__)
     p.add_argument("--mode", choices=["cdp", "persistent"], default="cdp",
@@ -337,6 +375,28 @@ def build_parser():
 
     s = sub.add_parser("probe", help="dump which selectors match right now")
     s.set_defaults(func=cmd_probe)
+
+    s = sub.add_parser("serve", help="run the REST API on the LAN (teams-interface)")
+    s.add_argument("--host", default=None, help="bind address (default 0.0.0.0)")
+    s.add_argument("--api-port", type=int, default=None, metavar="PORT",
+                   help="HTTP port (default 8787); --port is the browser's CDP port")
+    s.add_argument("--hostname", default=None,
+                   help="mDNS name, without .local (default teams-interface)")
+    s.add_argument("--watch", action="append", metavar="CHAT",
+                   help="chat title substring to monitor; repeatable")
+    s.add_argument("--anchor", default=None,
+                   help='what makes a message a job (default "@claude"; '
+                        'empty string means every incoming message)')
+    s.add_argument("--interval", type=int, default=None,
+                   help="seconds between polls (default 45)")
+    s.add_argument("--reply-prefix", default=None,
+                   help='stamped on every reply (default "[claude-code]")')
+    s.add_argument("--no-mdns", action="store_true", help="do not advertise on the LAN")
+    s.add_argument("--no-auth", action="store_true",
+                   help="serve without a token -- only ever on a trusted network")
+    s.add_argument("--config", default=None, help="path to teams-interface.json")
+    s.add_argument("--quiet", action="store_true", help="no per-request log lines")
+    s.set_defaults(func=cmd_serve)
 
     s = sub.add_parser("shot", help="screenshot the tab")
     s.add_argument("path", nargs="?", default="out/teams.png")

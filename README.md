@@ -68,6 +68,7 @@ Global flags go **before** the subcommand: `.\teams.ps1 --json read "Sam"`.
 | `read [chat]` | dump messages from a chat; `--history N` scrolls up for older ones |
 | `search <term>` | search messages across every chat (read-only) |
 | `send <chat> <text>` | **sends a message**; `--dry-run` types it without sending |
+| `serve` | run the REST bridge on the LAN (see below); `.\teams-api.ps1` is a shortcut |
 | `selftest` | 16 checks over every path except the actual send |
 | `probe` | which candidate selectors match right now, per frame |
 | `shot [path]` | screenshot the tab |
@@ -84,6 +85,107 @@ Get-Content msg.txt | .\teams.ps1 send "Sam"    # body from stdin
 Chats are matched by **case-insensitive substring** of their title, so
 `read "Sam"` opens the first chat whose title contains "sam". If nothing
 matches, the error lists the titles that were visible.
+
+---
+
+## Teams as a front end for Claude Code
+
+The other half of this repo: a REST service that puts a Claude Code session on
+the other end of a Teams DM. Someone messages you `@claude why is the build
+red?`; the server notices, a Claude session picks the job up, works in the repo,
+and answers in the same chat with `[claude-code]` in front so nobody mistakes it
+for you.
+
+```powershell
+.\teams-api.ps1          # or: .\teams.ps1 serve
+```
+
+```
+teams-interface listening on 0.0.0.0:8787
+  http://teams-interface.local:8787
+  http://192.168.11.14:8787
+mDNS: teams-interface.local -> 192.168.11.14 (registered)
+token: 3aP9…                (also in teams-interface.json)
+watching: miyachi haruna [@claude]  every 45s  replying with '[claude-code]'
+```
+
+It advertises itself over mDNS, so **`http://teams-interface.local:8787/`
+resolves from any machine on the LAN** — no DNS server, no hosts file. Open that
+URL and the service documents itself: every endpoint, the watched chats, the
+anchor, and a copy-pasteable listener loop, all rendered from the live config.
+
+### Why the server polls and the agent does not
+
+A Claude session polling Teams itself would spend tokens on every empty tick.
+Here the browser poll is free, and the agent blocks on a claim that only returns
+when a real message arrives:
+
+```
+Teams DM ──poll every 45s──> server ──long-poll──> Claude Code session
+    ^                                                     |
+    └──────────── reply, prefixed "[claude-code]" ─────────┘
+```
+
+### Driving it
+
+```bash
+python tools/teams_interface.py next --wait 60      # claim a job; exit 4 = none
+python tools/teams_interface.py reply <id> "done"   # answer in chat, close job
+python tools/teams_interface.py say "haruna" "hi"   # unprompted message
+python tools/teams_interface.py status              # browser, watcher, queue
+```
+
+`tools/teams_interface.py` is standard-library only, so it runs on any machine
+on the LAN with any Python — no venv, no Playwright, no browser. The heavy half
+stays on the box with the signed-in Chrome.
+
+A Claude Code session in this repo picks up the `teams-interface` skill on its
+own; `/loop /teams-interface` turns it into a listener. See
+`.claude/skills/teams-interface/SKILL.md`.
+
+### Configuring it
+
+`teams-interface.json` is written on first run and is gitignored — it holds the
+API token and, in the state file beside it, real message text.
+
+| key | default | meaning |
+| --- | --- | --- |
+| `watch` | `[{"chat": "miyachi haruna", "anchor": "@claude"}]` | chats to monitor; `chat` is a title substring, `from` optionally pins the author |
+| `anchor` | `"@claude"` | what makes a message a job; `""` means *every* incoming message |
+| `interval` | `45` | seconds between polls |
+| `reply_prefix` | `"[claude-code]"` | stamped on every reply — and skipped on the way in, so the bridge never answers itself |
+| `port` / `hostname` | `8787` / `teams-interface` | HTTP port and the `.local` name |
+| `auth` / `token` | `true` / generated | see below |
+
+Flags override the file for one run: `.\teams-api.ps1 --watch "Sam" --anchor
+"@bot" --interval 30`.
+
+**Authentication is on by default and should stay on.** This binds `0.0.0.0` and
+can read and send your Teams messages, so anyone who can reach the port could
+message your colleagues as you. The token is generated on first run, printed at
+startup, and sent as `Authorization: Bearer <token>`. `--no-auth` exists for a
+trusted network; the root page says so in red if you use it.
+
+The first poll of a chat only records where the conversation currently ends, so
+starting the server never fires off replies to a backlog of old `@claude`
+messages. A job claimed by a session that then died goes back on the queue at
+restart rather than being swallowed.
+
+**Each poll clicks into the watched chat**, because reading Teams means reading
+what it has rendered. On the shared browser that shows up as the view switching
+every 45 s — harmless (Teams keeps per-chat drafts, so nothing you were typing
+is lost) but visible if you were watching. `launch --minimized` or `--headless`
+puts it out of sight; a second profile and port keeps it out of the way
+entirely.
+
+### Checking it
+
+```powershell
+.\.venv\Scripts\python.exe tests\test_bridge.py   # offline: the queueing rules
+.\teams.ps1 selftest                              # the browser half, 16 checks
+```
+
+---
 
 ## Modes
 
