@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Convenience wrapper: ./teams chats   /   ./teams read "Sam"
+# (the POSIX twin of teams.ps1)
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+exec "$here/.venv/bin/python" -X utf8 -m teams_browser "$@"

@@ -2,7 +2,8 @@
 
 No browser, no network, no pytest:
 
-    .\\.venv\\Scripts\\python.exe tests\\test_bridge.py
+    .\\.venv\\Scripts\\python.exe tests\\test_bridge.py   # Windows
+    ./.venv/bin/python tests/test_bridge.py                # Linux, macOS
 
 `teams selftest` covers the browser half. This covers the half that decides
 *which* messages become jobs -- which you cannot exercise by hand without

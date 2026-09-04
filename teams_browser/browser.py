@@ -27,27 +27,80 @@ REPO = Path(__file__).resolve().parent.parent
 PROFILE_DIR = Path(os.environ.get("TEAMS_BROWSER_PROFILE", REPO / "profile"))
 DEFAULT_PORT = int(os.environ.get("TEAMS_BROWSER_PORT", "9223"))
 
-CHROME_CANDIDATES = [
-    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
-]
-EDGE_CANDIDATES = [
-    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-]
+# Where an installed Chrome/Edge lives, per platform.  Order matters: the
+# first hit wins, so the system-wide install is preferred over a per-user one.
+_CANDIDATES = {
+    "win32": {
+        "chrome": [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+        ],
+        "edge": [
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        ],
+    },
+    "linux": {
+        "chrome": [
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/opt/google/chrome/chrome",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/snap/bin/chromium",
+        ],
+        "edge": [
+            "/usr/bin/microsoft-edge",
+            "/usr/bin/microsoft-edge-stable",
+            "/opt/microsoft/msedge/msedge",
+        ],
+    },
+    "darwin": {
+        "chrome": [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            os.path.expanduser(
+                "~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        ],
+        "edge": [
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        ],
+    },
+}
+# Names to try on PATH when no known install path matched.  Chromium counts:
+# Teams web only refuses Firefox, and any Chromium build drives it fine.
+_ON_PATH = {
+    "chrome": ["google-chrome", "google-chrome-stable", "chrome",
+               "chromium", "chromium-browser"],
+    "edge": ["microsoft-edge", "microsoft-edge-stable", "msedge"],
+}
+
+
+def _platform_key() -> str:
+    if sys.platform == "win32":
+        return "win32"
+    if sys.platform == "darwin":
+        return "darwin"
+    return "linux"          # every other POSIX behaves the same way here
+
+
+# Kept as module-level names because the CLI and tests refer to them.
+CHROME_CANDIDATES = _CANDIDATES[_platform_key()]["chrome"]
+EDGE_CANDIDATES = _CANDIDATES[_platform_key()]["edge"]
 
 
 def find_browser(prefer: str = "chrome") -> str:
-    order = CHROME_CANDIDATES + EDGE_CANDIDATES
-    if prefer == "edge":
-        order = EDGE_CANDIDATES + CHROME_CANDIDATES
-    for path in order:
-        if path and Path(path).exists():
-            return path
-    found = shutil.which("chrome") or shutil.which("msedge")
-    if found:
-        return found
+    order = ["chrome", "edge"] if prefer != "edge" else ["edge", "chrome"]
+    fam = _CANDIDATES[_platform_key()]
+    for kind in order:
+        for path in fam.get(kind, ()):
+            if path and Path(path).exists():
+                return path
+    for kind in order:
+        for name in _ON_PATH[kind]:
+            found = shutil.which(name)
+            if found:
+                return found
     raise RuntimeError("No Chrome or Edge found; install one or pass --browser-path")
 
 

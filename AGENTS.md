@@ -5,9 +5,24 @@ running anything. `CLAUDE.md` points here; they are the same contract.
 
 ## What this is
 
-A Windows CLI that reads and writes Microsoft Teams by driving a real Chrome
-over CDP with Playwright. There is no API key and no service account: it reuses
-a browser profile that a **human** has signed into.
+A CLI that reads and writes Microsoft Teams by driving a real Chrome over CDP
+with Playwright. There is no API key and no service account: it reuses a
+browser profile that a **human** has signed into.
+
+It runs on **Windows and Linux** (macOS should work; untested). Every command
+is the same on both; only the wrapper differs — `.\teams.ps1 <args>` on
+Windows, `./teams <args>` on Linux. Where this document shows PowerShell, the
+POSIX equivalent is the same line with that substitution unless it says
+otherwise.
+
+The two platforms differ in exactly three places, all of them about *where the
+browser window lives*:
+
+| | Windows | Linux |
+| --- | --- | --- |
+| bootstrap | `setup.ps1` (winget) | `setup.sh` (apt hints only, never sudo) |
+| unattended | `service.ps1` — Scheduled Task | `service.sh` — `systemd --user` |
+| a screen to draw on | the user's desktop | `Xvfb`, plus `login-vnc.sh` to sign in |
 
 ## Rules you must not break
 
@@ -32,12 +47,22 @@ a browser profile that a **human** has signed into.
 ## Setup (fresh clone, nothing installed)
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\setup.ps1
+powershell -ExecutionPolicy Bypass -File .\setup.ps1     # Windows
+```
+```bash
+./setup.sh                                              # Linux, macOS
 ```
 
-Idempotent. Installs Python via winget if missing, creates `.venv`, installs
-`requirements.txt`, checks for Chrome/Edge. Exit code 0 means ready.
-Add `-WithPlaywrightBrowser` only if `--mode persistent`/`--headless` is needed.
+Idempotent, and exit code 0 means ready. Both create `.venv`, install
+`requirements.txt` and check for Chrome/Edge. `setup.ps1` installs Python via
+winget if it is missing; `setup.sh` never installs anything — it prints the
+`apt`/`dnf`/`brew` line and exits nonzero, because a setup script has no
+business calling sudo. Add `-WithPlaywrightBrowser` / `--with-browser` only if
+`--mode persistent`/`--headless` is needed.
+
+On a headless Linux box `setup.sh` also checks for `Xvfb` and says so if it is
+missing — without a display Chrome exits at once and `launch` fails 30 s later
+with a misleading *did not expose CDP*.
 
 Then, once — a human must be at the keyboard:
 
@@ -47,7 +72,33 @@ Then, once — a human must be at the keyboard:
 .\teams.ps1 wait-login    # exits 0 when the chat list renders, 2 on timeout
 ```
 
-Verify with `.\teams.ps1 selftest` — expect `16/16 passed`.
+On a headless Linux box there is no window to sign into, so put a viewer in
+front of the virtual display first (see **Signing in on a headless box**).
+
+Verify with `.\teams.ps1 selftest` / `./teams selftest` — expect `16/16 passed`.
+
+**A profile cannot be moved between platforms.** Chrome on Windows encrypts
+its cookie store with a DPAPI key bound to that Windows account; copying
+`profile/` to Linux yields a profile that loads but is signed out. Moving this
+tool to another machine always costs one fresh human sign-in.
+
+### Signing in on a headless box
+
+`service.sh install` runs the browser on an `Xvfb` display nobody can see.
+`login-vnc.sh` puts a viewer in front of it — `x11vnc` for the screen, noVNC so
+the viewer is an ordinary web page and no VNC client is needed:
+
+```bash
+./login-vnc.sh start      # prints the ssh -L line and the URL to open
+# ...human signs in to Teams in that browser tab...
+./teams wait-login
+./login-vnc.sh stop       # leave it stopped; the bridge keeps running
+```
+
+Both halves bind `127.0.0.1` only and there is deliberately no VNC password:
+the boundary is the SSH tunnel, not a password typed over a LAN. Do not
+"improve" this by binding `0.0.0.0` — that would put a signed-in Teams session
+on the network behind nothing at all.
 
 ### Keeping it out of the user's way
 
@@ -69,7 +120,9 @@ idle and accept the cold start.
 
 ## Invocation
 
-`.\teams.ps1 <args>` wraps `.\.venv\Scripts\python.exe -X utf8 -m teams_browser`.
+`.\teams.ps1 <args>` wraps `.\.venv\Scripts\python.exe -X utf8 -m teams_browser`;
+`./teams <args>` wraps `./.venv/bin/python -X utf8 -m teams_browser`. Same
+arguments, same exit codes.
 Either form works. **Global flags come before the subcommand:**
 
 ```powershell
@@ -147,13 +200,40 @@ over mDNS, so any LAN machine can reach it by name.
 .\teams-api.ps1 --host 127.0.0.1 --no-mdns       # local only
 ```
 
-For unattended runs use `service.ps1` (Scheduled Task at logon, no admin):
+For unattended runs use `service.ps1` on Windows (Scheduled Task at logon, no
+admin) or `service.sh` on Linux (`systemd --user`, no root):
 
 ```powershell
 .\service.ps1 install | status | log | restart | stop | uninstall
 ```
+```bash
+./service.sh  install | status | log | restart | stop | uninstall
+```
 
-Four rules it encodes, all learned the hard way — do not "simplify" them away:
+`service.sh install` writes two units: `teams-xvfb.service` (a virtual display,
+only when the machine has no `DISPLAY` of its own) and `teams-interface.service`
+(the bridge). It bakes the display and the CDP port into the unit as
+`Environment=`, which is also the only way to move the browser off port 9223 for
+good: `serve` overwrites `browser.port` in the config from its own flag default
+on every start, and that default comes from `TEAMS_BROWSER_PORT`.
+
+Three things `service.sh` encodes, for the same reasons the Windows one does:
+
+* **`KillMode=process`**, so the browser outlives a restart of the bridge. The
+  default (`control-group`) takes Chrome down with the unit on every restart,
+  forcing a slow Teams reload each time.
+* **`serve --log`, never a shell redirect** — same reason as Windows, below.
+  systemd cannot express a redirect in `ExecStart` anyway, which is a hint.
+* **`stop` kills whoever holds the port**, not just what systemd started, so a
+  stray hand-run `serve` cannot survive a `stop` and double-answer.
+
+`systemd --user` units only survive logout if **linger** is on for the account
+(`sudo loginctl enable-linger <user>`); `service.sh` checks and says so. Without
+it the user manager is torn down at logout and the bridge dies with it — the
+Linux face of the Windows console-close trap below.
+
+Four rules `service.ps1` encodes, all learned the hard way — do not "simplify"
+them away:
 
 * the task runs **`pythonw.exe`**, never `python.exe`. A console app launched
   by a task in an interactive session gets a real console window; closing that
@@ -179,8 +259,16 @@ else is listening on", so `Server.allow_reuse_address` is off there and a second
 `serve` exits 1 with a clear message instead of silently double-answering.
 
 The shipped default port is 8787, but a config may set `"port": 80` so the URL
-needs no port at all (Windows allows a non-admin bind on 80). URL building in
-`api.py` and `tools/teams_interface.py` drops the `:80` — keep both in step.
+needs no port at all — Windows allows a non-admin bind on 80. **Linux does not**
+(ports below `net.ipv4.ip_unprivileged_port_start`, normally 1024, need root or
+`CAP_NET_BIND_SERVICE`), so there the port-free URL comes from a reverse proxy
+in front of 8787 instead. URL building in `api.py` and `tools/teams_interface.py`
+drops the `:80` — keep both in step.
+
+Likewise mDNS: `mdns.py` publishes the name itself via `zeroconf`, which is what
+you want on Windows. On a Linux box already running `avahi-daemon` the name is
+usually published by avahi instead — set `"mdns": false` and let the system do
+it, rather than having two responders answer for one name.
 
 **`GET /` is the contract.** It serves markdown generated from the live config:
 every route, the watched chats, the anchor, the interval, and a working listener
@@ -244,8 +332,11 @@ session acting as the listener.
 | `teams_browser/mdns.py` | the `teams-interface.local` advertisement |
 | `tools/teams_interface.py` | dependency-free client, for agents anywhere on the LAN |
 | `tests/test_bridge.py` | offline checks for the queueing rules |
-| `setup.ps1` | Windows bootstrap |
+| `setup.ps1` / `setup.sh` | bootstrap: Windows / POSIX |
+| `service.ps1` / `service.sh` | unattended running: Scheduled Task / `systemd --user` |
+| `login-vnc.sh` | Linux: a viewer on the virtual display, for the human sign-in |
 | `teams.ps1` / `teams-api.ps1` | thin wrappers around the venv interpreter |
+| `teams` / `teams-api` | the same wrappers for POSIX shells |
 
 Keep new Teams-specific DOM knowledge in `teams.py`, not in `cli.py` or `api.py`.
 Playwright objects must only ever be touched on the `BrowserWorker` thread —
@@ -256,6 +347,10 @@ handlers submit a callable and block, they never hold a `Page`.
 ```powershell
 .\.venv\Scripts\python.exe tests\test_bridge.py   # offline, no browser, no network
 .\teams.ps1 selftest                              # the browser half, 16 checks
+```
+```bash
+./.venv/bin/python tests/test_bridge.py            # offline, no browser, no network
+./teams selftest                                   # the browser half, 16 checks
 ```
 
 `test_bridge.py` covers what `selftest` structurally cannot: which messages

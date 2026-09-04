@@ -1,0 +1,7 @@
+# Shell scripts and the extensionless wrappers must reach Linux with LF
+# endings: CRLF makes the kernel look for an interpreter named "bash\r".
+*.sh        text eol=lf
+teams       text eol=lf
+teams-api   text eol=lf
+# PowerShell is happiest with CRLF on the machine it runs on.
+*.ps1       text eol=crlf

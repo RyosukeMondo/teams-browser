@@ -1,9 +1,14 @@
 # teams-browser
 
-Read and write Microsoft Teams from Windows by driving a **real Chrome** with
-Playwright over CDP. No Graph API, no app registration, no admin consent, no
-tenant permissions — it uses the Teams *web* client with your own signed-in
-session.
+Read and write Microsoft Teams by driving a **real Chrome** with Playwright
+over CDP. No Graph API, no app registration, no admin consent, no tenant
+permissions — it uses the Teams *web* client with your own signed-in session.
+
+Runs on **Windows and Linux** (macOS should work; untested). The commands are
+identical; only the wrapper differs — `.\teams.ps1` or `./teams`. On a headless
+Linux server it drives Chrome on a virtual display and you sign in once through
+a browser tab, which makes it a reasonable thing to leave running on a machine
+that is always on.
 
 **First run — once, with a visible browser window.** You sign in yourself; the
 tool never handles credentials.
@@ -17,10 +22,31 @@ powershell -ExecutionPolicy Bypass -File .\setup.ps1 -Launch
 .\teams.ps1 chats
 ```
 
+On Linux or macOS:
+
+```bash
+git clone https://github.com/RyosukeMondo/teams-browser
+cd teams-browser
+./setup.sh
+./teams launch            # a Chrome window opens -- sign in to Teams there
+./teams wait-login
+./teams chats
+```
+
 `setup.ps1` assumes **nothing** is installed. It finds or installs Python (via
 winget), creates the virtual environment, installs dependencies, and checks you
-have Chrome or Edge. It is safe to re-run — every step is skipped if already
-done.
+have Chrome or Edge. `setup.sh` does the same except that it never installs
+anything for you — it prints the `apt`/`dnf`/`brew` line and stops, because a
+setup script should not be calling sudo behind your back. Both are safe to
+re-run; every step is skipped if already done.
+
+No display? See [Running it on a headless Linux box](#running-it-on-a-headless-linux-box).
+
+One thing that does **not** move between machines: the `profile/` directory.
+Chrome encrypts its cookie store with a key belonging to the OS account that
+created it — DPAPI on Windows, the login keyring on Linux — so copying a signed-in
+profile to another machine gives you a profile that is signed out. Every new
+machine costs exactly one human sign-in.
 
 **Every run after that — no window on your desktop.** The sign-in is remembered
 in `./profile`, so from now on you can run it invisibly:
@@ -180,6 +206,11 @@ entirely.
 
 ### Keeping it up
 
+On Linux, `./service.sh install | status | log | restart | stop | uninstall`
+does the same job through `systemd --user` — see
+[Running it on a headless Linux box](#running-it-on-a-headless-linux-box).
+On Windows:
+
 ```powershell
 .\service.ps1 install     # run at every logon, no window; starts it now too
 .\service.ps1 status      # task state, next watchdog run, is it answering
@@ -209,10 +240,16 @@ while being broken:
 
 ### No port in the URL
 
-`teams-interface.json` on this machine sets `"port": 80`, so the address is
-just **`http://teams-interface.local/`**. Windows lets a normal user bind 80,
-no admin needed. Every URL the service prints and the client builds drops the
+`teams-interface.json` can set `"port": 80`, so the address is just
+**`http://teams-interface.local/`**. Windows lets a normal user bind 80, no
+admin needed. Every URL the service prints and the client builds drops the
 `:80`.
+
+Linux will not let an unprivileged process bind 80 (anything below
+`net.ipv4.ip_unprivileged_port_start`, normally 1024, needs root or
+`CAP_NET_BIND_SERVICE`). There the tidy answer is to leave the service on 8787
+and put a reverse proxy — Caddy, nginx — in front of it, which is also what
+publishes the friendly name. Same URL, nothing running as root.
 
 The shipped default stays `8787`, because port 80 collides with anything else
 serving HTTP on the machine. If something does take it, `serve` now exits 1
@@ -227,6 +264,48 @@ twice.
 .\.venv\Scripts\python.exe tests\test_bridge.py   # offline: the queueing rules
 .\teams.ps1 selftest                              # the browser half, 16 checks
 ```
+
+---
+
+## Running it on a headless Linux box
+
+This is the interesting deployment: a machine that is always on, so the bridge
+is always answering, with no desktop session to keep alive and nobody logged in.
+
+```bash
+./setup.sh
+./service.sh install      # Xvfb + the bridge, as systemd --user units
+./login-vnc.sh start      # a viewer on that virtual display; prints the URL
+# ...sign in to Teams in that browser tab, once...
+./teams wait-login
+./login-vnc.sh stop
+./service.sh status
+```
+
+How the pieces fit:
+
+* **`Xvfb`** gives Chrome a screen to draw on. CDP does not need a *visible*
+  window, but it does need a real one — headless Chrome cannot show a sign-in
+  form a human can type into, and Teams virtualises its message list by
+  viewport size, so an unrealistically small screen renders too few messages.
+* **`systemd --user`** replaces the Scheduled Task. `Restart=always` covers the
+  crash case and `WantedBy=default.target` covers the reboot case, which is what
+  the Windows side needed two separate triggers to achieve.
+* **linger** (`sudo loginctl enable-linger <user>`) is what keeps user units
+  running when nobody is logged in. Without it systemd tears the user manager
+  down at logout and takes the bridge with it. `service.sh` checks and tells you.
+* **`login-vnc.sh`** is only for the sign-in. `x11vnc` and noVNC both bind
+  `127.0.0.1`, so you reach them over an SSH tunnel and a signed-in Teams
+  session is never exposed to the network. Stop it when you are done.
+
+`KillMode=process` in the unit is deliberate: the browser is started by the
+bridge but outlives it, so restarting the service re-attaches to a warm Teams
+instead of reloading it. `service.sh uninstall` is the one that does take the
+browser with it, matching on `--user-data-dir` so it can never hit somebody
+else's Chrome.
+
+If the box already runs `avahi-daemon`, set `"mdns": false` and let avahi
+publish the name — two mDNS responders answering for one name is a bad time.
 
 ---
 
