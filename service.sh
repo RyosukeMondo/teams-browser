@@ -53,6 +53,21 @@ needs_xvfb() {
     [ -z "${DISPLAY:-}" ] && [ -z "${TEAMS_DISPLAY:-}" ]
 }
 
+# What the *installed* unit says, which is not always what this shell would
+# choose. Reporting the shell's guess instead is how `status` ends up naming
+# some other application's browser as ours.
+unit_env() {
+    local unit="$UNIT_DIR/$NAME.service"
+    [ -f "$unit" ] || return 1
+    local v
+    v="$(sed -n "s/^Environment=$1=//p" "$unit" | head -1)"
+    [ -n "$v" ] && echo "$v"
+}
+
+running_display()  { unit_env DISPLAY            || resolve_display; }
+running_cdp_port() { unit_env TEAMS_BROWSER_PORT || echo "$CDP_PORT"; }
+installed_xvfb()   { [ -f "$UNIT_DIR/$XVFB_NAME.service" ]; }
+
 port_holder() {
     # ss is on every modern Linux; lsof is not.
     ss -ltnpH "sport = :$1" 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2
@@ -193,16 +208,17 @@ restart)
 
 status)
     p="$(api_port)"
+    cdp="$(running_cdp_port)"
     state="$(systemctl --user is-active "$NAME.service" 2>/dev/null || true)"
     printf 'unit      %s (%s)\n' "$NAME.service" "${state:-not installed}"
-    if needs_xvfb; then
-        printf 'display   %s (%s)\n' "$(resolve_display)" \
+    if installed_xvfb; then
+        printf 'display   %s (%s)\n' "$(running_display)" \
             "$(systemctl --user is-active "$XVFB_NAME.service" 2>/dev/null || echo 'no unit')"
     else
-        printf 'display   %s (not ours)\n' "$(resolve_display)"
+        printf 'display   %s (not ours)\n' "$(running_display)"
     fi
     printf 'api port  %s (held by pid %s)\n' "$p" "$(port_holder "$p" || echo none)"
-    printf 'cdp port  %s (held by pid %s)\n' "$CDP_PORT" "$(port_holder "$CDP_PORT" || echo none)"
+    printf 'cdp port  %s (held by pid %s)\n' "$cdp" "$(port_holder "$cdp" || echo none)"
     body="$(curl -sS --max-time 5 "http://127.0.0.1:$p/health" 2>/dev/null || true)"
     if [ -n "$body" ]; then
         printf 'health    %s\n' "$body"
