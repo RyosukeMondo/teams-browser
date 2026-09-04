@@ -147,6 +147,25 @@ over mDNS, so any LAN machine can reach it by name.
 .\teams-api.ps1 --host 127.0.0.1 --no-mdns       # local only
 ```
 
+For unattended runs use `service.ps1` (Scheduled Task at logon, no admin):
+
+```powershell
+.\service.ps1 install | status | log | restart | stop | uninstall
+```
+
+Two rules it encodes, both learned the hard way — do not "simplify" them away:
+
+* the task runs the interpreter **directly** with `serve --quiet --log <path>`,
+  never a PowerShell wrapper doing `*>> log`. With a wrapper, stopping the task
+  kills the wrapper and leaves the server alive with a dead stdout: still
+  holding the port, unable to answer a single request.
+* `stop`/`restart` kill **whoever holds the port**, because
+  `Stop-ScheduledTask` only stops what the task itself launched.
+
+Only one instance may run: on Windows `SO_REUSEADDR` means "bind a port someone
+else is listening on", so `Server.allow_reuse_address` is off there and a second
+`serve` exits 1 with a clear message instead of silently double-answering.
+
 **`GET /` is the contract.** It serves markdown generated from the live config:
 every route, the watched chats, the anchor, the interval, and a working listener
 loop. Read that rather than guessing; `GET /?format=json` gives the route table

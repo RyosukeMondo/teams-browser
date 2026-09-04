@@ -11,6 +11,7 @@ from __future__ import annotations
 import hmac
 import json
 import re
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -492,8 +493,12 @@ class Handler(BaseHTTPRequestHandler):
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = True
     quiet = False
+    # On Windows SO_REUSEADDR does not mean "reuse a TIME_WAIT port", it means
+    # "bind a port someone else is already listening on" -- so a second `serve`
+    # would start happily, and the two would drive the same browser and answer
+    # the same message twice. Elsewhere it keeps its usual, useful meaning.
+    allow_reuse_address = sys.platform != "win32"
 
 
 def serve(cfg: dict, quiet: bool = False) -> int:
@@ -510,7 +515,15 @@ def serve(cfg: dict, quiet: bool = False) -> int:
     svc.base_url = svc.urls[0]
 
     Handler.service = svc
-    httpd = Server((host, port), Handler)
+    try:
+        httpd = Server((host, port), Handler)
+    except OSError as e:
+        print("cannot bind %s:%d -- %s\n"
+              "Another teams-interface is probably already running. Check with\n"
+              "    curl http://127.0.0.1:%d/health\n"
+              "and either use it, stop it, or pass --api-port for a second one."
+              % (host, port, e, port), file=sys.stderr, flush=True)
+        return 1
     httpd.quiet = quiet
     svc.start_background()
 

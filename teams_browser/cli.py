@@ -301,6 +301,18 @@ def cmd_serve(a):
     cfg["browser"]["mode"] = a.mode
     if a.headless:
         cfg["browser"]["headless"] = True
+
+    if a.log:
+        # Own the log file rather than relying on a shell redirect. Under a
+        # scheduled task the redirect lives in a wrapper process; kill that and
+        # the server survives with a broken stdout, still holding the port but
+        # unable to answer. Writing the file ourselves has no such parent.
+        path = Path(a.log)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stream = open(path, "a", encoding="utf-8", buffering=1)
+        sys.stdout = sys.stderr = stream
+        print("\n=== teams-interface starting %s ==="
+              % __import__("datetime").datetime.now().isoformat(timespec="seconds"))
     return serve(cfg, quiet=a.quiet)
 
 
@@ -395,6 +407,9 @@ def build_parser():
     s.add_argument("--no-auth", action="store_true",
                    help="serve without a token -- only ever on a trusted network")
     s.add_argument("--config", default=None, help="path to teams-interface.json")
+    s.add_argument("--log", default=None, metavar="PATH",
+                   help="append output to this file instead of the console "
+                        "(use this for unattended runs, not a shell redirect)")
     s.add_argument("--quiet", action="store_true", help="no per-request log lines")
     s.set_defaults(func=cmd_serve)
 

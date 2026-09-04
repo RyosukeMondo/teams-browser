@@ -178,6 +178,25 @@ is lost) but visible if you were watching. `launch --minimized` or `--headless`
 puts it out of sight; a second profile and port keeps it out of the way
 entirely.
 
+### Keeping it up
+
+```powershell
+.\service.ps1 install     # start at every logon, hidden; starts it now too
+.\service.ps1 status      # is the task registered, is the server answering
+.\service.ps1 log         # tail out\teams-interface.log
+.\service.ps1 restart
+.\service.ps1 uninstall
+```
+
+No admin rights: the task runs as you, in your own session, which is where the
+browser has to live anyway. The server writes its own log via `serve --log`
+rather than a shell redirect — a redirect lives in a wrapper process, and
+killing that leaves the server alive with a dead stdout, still holding the port
+but unable to answer anything.
+
+`stop` and `restart` go by **who holds the port**, not by what the task
+launched, for the same reason.
+
 ### Checking it
 
 ```powershell
