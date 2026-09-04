@@ -506,12 +506,15 @@ def serve(cfg: dict, quiet: bool = False) -> int:
     ip = lan_ip()
     host, port = cfg["host"], int(cfg["port"])
     loopback_only = host in ("127.0.0.1", "localhost", "::1")
+    # On 80 the port is implied, so leave it off: the whole point of serving
+    # there is that nobody has to type it.
+    suffix = "" if port == 80 else ":%d" % port
     svc.urls = []
     if cfg.get("hostname") and cfg.get("mdns") and not loopback_only:
-        svc.urls.append("http://%s.local:%d" % (cfg["hostname"], port))
+        svc.urls.append("http://%s.local%s" % (cfg["hostname"], suffix))
     if not loopback_only:
-        svc.urls.append("http://%s:%d" % (ip, port))
-    svc.urls.append("http://127.0.0.1:%d" % port)
+        svc.urls.append("http://%s%s" % (ip, suffix))
+    svc.urls.append("http://127.0.0.1%s" % suffix)
     svc.base_url = svc.urls[0]
 
     Handler.service = svc

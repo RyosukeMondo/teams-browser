@@ -181,21 +181,45 @@ entirely.
 ### Keeping it up
 
 ```powershell
-.\service.ps1 install     # start at every logon, hidden; starts it now too
-.\service.ps1 status      # is the task registered, is the server answering
+.\service.ps1 install     # run at every logon, no window; starts it now too
+.\service.ps1 status      # task state, next watchdog run, is it answering
 .\service.ps1 log         # tail out\teams-interface.log
 .\service.ps1 restart
 .\service.ps1 uninstall
 ```
 
 No admin rights: the task runs as you, in your own session, which is where the
-browser has to live anyway. The server writes its own log via `serve --log`
-rather than a shell redirect — a redirect lives in a wrapper process, and
-killing that leaves the server alive with a dead stdout, still holding the port
-but unable to answer anything.
+browser has to live anyway. It survives a reboot (it starts at logon) and a
+crash (a watchdog trigger re-runs it every 5 minutes; while it is alive the
+extra run is discarded, so the cost of a crash is at most five minutes).
 
-`stop` and `restart` go by **who holds the port**, not by what the task
-launched, for the same reason.
+Four details in there are load-bearing — each was a way the service looked fine
+while being broken:
+
+* it runs **`pythonw.exe`**, not `python.exe`. A console app started by a task
+  in your session gets a real console window, and closing that window sends
+  Ctrl-C and kills the server. `pythonw` has no console at all.
+* `serve --log` opens the log file **itself**, rather than a shell `*>>`
+  redirect. A redirect lives in a wrapper process; kill that and the server
+  survives with a dead stdout — still holding the port, unable to answer.
+  (It is also why `pythonw`, which has no stdout, is safe here.)
+* `stop`/`restart` go by **who holds the port**, not by what the task launched:
+  `Stop-ScheduledTask` only stops the latter.
+* only one instance may run — see the note on `SO_REUSEADDR` below.
+
+### No port in the URL
+
+`teams-interface.json` on this machine sets `"port": 80`, so the address is
+just **`http://teams-interface.local/`**. Windows lets a normal user bind 80,
+no admin needed. Every URL the service prints and the client builds drops the
+`:80`.
+
+The shipped default stays `8787`, because port 80 collides with anything else
+serving HTTP on the machine. If something does take it, `serve` now exits 1
+saying so rather than starting a second, silently-conflicting server: on
+Windows `SO_REUSEADDR` means "bind a port someone else is listening on", so
+two servers would otherwise both drive the browser and answer the same message
+twice.
 
 ### Checking it
 

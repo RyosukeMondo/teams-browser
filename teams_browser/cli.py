@@ -268,8 +268,20 @@ def cmd_shot(a):
 
 def cmd_serve(a):
     """Run the REST bridge: teams-interface.local on the LAN."""
+    import os
     from . import config as cfgmod
     from .api import serve
+
+    # Before anything that might print. Under pythonw.exe -- which is how the
+    # scheduled task runs, because it has no console for a stray window to
+    # appear in or for a stray Ctrl-C to kill -- sys.stdout is None, and the
+    # first print() would be an AttributeError.
+    if a.log:
+        path = Path(a.log)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        sys.stdout = sys.stderr = open(path, "a", encoding="utf-8", buffering=1)
+    elif sys.stdout is None or sys.stderr is None:
+        sys.stdout = sys.stderr = open(os.devnull, "w")
 
     cfg = cfgmod.load(a.config)
     # Persist the file *before* the flags are folded in: the file is the
@@ -303,16 +315,12 @@ def cmd_serve(a):
         cfg["browser"]["headless"] = True
 
     if a.log:
-        # Own the log file rather than relying on a shell redirect. Under a
-        # scheduled task the redirect lives in a wrapper process; kill that and
-        # the server survives with a broken stdout, still holding the port but
-        # unable to answer. Writing the file ourselves has no such parent.
-        path = Path(a.log)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        stream = open(path, "a", encoding="utf-8", buffering=1)
-        sys.stdout = sys.stderr = stream
+        # The log file is ours, not a shell redirect: a redirect lives in a
+        # wrapper process, and killing that leaves the server alive with a dead
+        # stdout -- still holding the port, unable to answer anything.
+        from datetime import datetime
         print("\n=== teams-interface starting %s ==="
-              % __import__("datetime").datetime.now().isoformat(timespec="seconds"))
+              % datetime.now().isoformat(timespec="seconds"))
     return serve(cfg, quiet=a.quiet)
 
 

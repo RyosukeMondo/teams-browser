@@ -153,18 +153,34 @@ For unattended runs use `service.ps1` (Scheduled Task at logon, no admin):
 .\service.ps1 install | status | log | restart | stop | uninstall
 ```
 
-Two rules it encodes, both learned the hard way — do not "simplify" them away:
+Four rules it encodes, all learned the hard way — do not "simplify" them away:
 
-* the task runs the interpreter **directly** with `serve --quiet --log <path>`,
-  never a PowerShell wrapper doing `*>> log`. With a wrapper, stopping the task
-  kills the wrapper and leaves the server alive with a dead stdout: still
-  holding the port, unable to answer a single request.
+* the task runs **`pythonw.exe`**, never `python.exe`. A console app launched
+  by a task in an interactive session gets a real console window; closing that
+  window sends Ctrl-C and kills the server (Task Scheduler then reports
+  `3221225786` / `0xC000013A`). `pythonw` has no console to show or close.
+* it runs the interpreter **directly** with `serve --quiet --log <path>`, never
+  a PowerShell wrapper doing `*>> log`. With a wrapper, stopping the task kills
+  the wrapper and leaves the server alive with a dead stdout: still holding the
+  port, unable to answer a single request. This is also what makes `pythonw`
+  (no stdout at all) safe — `serve --log` reassigns `sys.stdout` before
+  anything prints.
 * `stop`/`restart` kill **whoever holds the port**, because
   `Stop-ScheduledTask` only stops what the task itself launched.
+* two triggers, not one: **at logon** (survives reboot) and a **watchdog every
+  5 minutes** with `MultipleInstances=IgnoreNew`, so a tick while the server is
+  alive is discarded and a tick after it died revives it.
+
+`service.ps1 status` decodes the task result codes; `KILLED by Ctrl-C /
+console close` means someone reintroduced a console.
 
 Only one instance may run: on Windows `SO_REUSEADDR` means "bind a port someone
 else is listening on", so `Server.allow_reuse_address` is off there and a second
 `serve` exits 1 with a clear message instead of silently double-answering.
+
+The shipped default port is 8787, but a config may set `"port": 80` so the URL
+needs no port at all (Windows allows a non-admin bind on 80). URL building in
+`api.py` and `tools/teams_interface.py` drops the `:80` — keep both in step.
 
 **`GET /` is the contract.** It serves markdown generated from the live config:
 every route, the watched chats, the anchor, the interval, and a working listener

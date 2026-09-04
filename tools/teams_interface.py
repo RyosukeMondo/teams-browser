@@ -74,8 +74,9 @@ def resolve(url=None, token=None):
             token = token or cfg.get("token")
             if not url:
                 host = cfg.get("hostname") or "teams-interface"
-                port = cfg.get("port") or 8787
-                url = "http://%s.local:%s" % (host, port)
+                port = int(cfg.get("port") or 8787)
+                url = "http://%s.local%s" % (
+                    host, "" if port == 80 else ":%d" % port)
     return (url or DEFAULT_URL).rstrip("/"), token
 
 

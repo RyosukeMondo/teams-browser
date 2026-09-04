@@ -35,6 +35,22 @@ function Get-Port {
     return 8787
 }
 
+function Format-TaskResult {
+    <#  Task Scheduler reports these as bare unsigned decimals, and the
+        interesting ones are not guessable. 0xC000013A in particular is the
+        symptom of running under a console: closing the window Ctrl-C's the
+        server.  #>
+    param($Code)
+    switch ([uint32]$Code) {
+        0          { "ok" }
+        267009     { "running" }                     # 0x00041301
+        267011     { "not yet run" }                 # 0x00041303
+        2147946720 { "already running (ignored)" }   # 0x800710E0
+        3221225786 { "KILLED by Ctrl-C / console close" }  # 0xC000013A
+        default    { "0x{0:X8}" -f [uint32]$Code }
+    }
+}
+
 function Get-PortHolder {
     $held = Get-NetTCPConnection -LocalPort (Get-Port) -State Listen -ErrorAction SilentlyContinue
     if ($held) { return $held[0].OwningProcess }
@@ -81,18 +97,32 @@ switch ($Action) {
         # process between the task and the server: stopping the task kills the
         # wrapper, the server survives with a dead stdout, and it goes on
         # holding the port without being able to answer anything.
+        # pythonw.exe, not python.exe: a console app started by the task in an
+        # interactive session gets a real console window, and closing that
+        # window sends Ctrl-C and kills the server. pythonw has no console at
+        # all -- nothing to show, nothing to close. It also has no stdout,
+        # which is exactly why `serve --log` opens the log file itself.
         $taskAction = New-ScheduledTaskAction `
-            -Execute (Join-Path $root '.venv\Scripts\python.exe') `
+            -Execute (Join-Path $root '.venv\Scripts\pythonw.exe') `
             -Argument "-X utf8 -m teams_browser serve --quiet --log `"$log`"" `
             -WorkingDirectory $root
-        $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+
+        $atLogon = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+        # Watchdog: re-run every 5 minutes forever. Combined with
+        # MultipleInstances=IgnoreNew below, a run while the server is alive is
+        # discarded, and a run after it died brings it straight back -- so a
+        # crash costs at most five minutes, with no extra moving parts.
+        $watchdog = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+            -RepetitionInterval (New-TimeSpan -Minutes 5)
+        $taskTrigger = @($atLogon, $watchdog)
         # The browser it drives lives in this user's session, so the task must
         # run interactively as the same user -- never as SYSTEM.
         $taskPrincipal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
             -LogonType Interactive -RunLevel Limited
         $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
             -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
-            -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+            -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew `
+            -StartWhenAvailable   # run a watchdog tick the machine slept through
         Register-ScheduledTask -TaskName $TaskName -Action $taskAction -Trigger $taskTrigger `
             -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
         Write-Host "registered scheduled task '$TaskName' (runs at logon as $env:USERNAME)" -ForegroundColor Green
@@ -135,8 +165,10 @@ switch ($Action) {
         $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
         if ($task) {
             $info = Get-ScheduledTaskInfo -TaskName $TaskName
-            Write-Host ("task:   {0}  (last run {1}, result {2})" -f `
-                    $task.State, $info.LastRunTime, $info.LastTaskResult)
+            Write-Host ("task:   {0}  (last run {1}, result: {2})" -f `
+                    $task.State, $info.LastRunTime, (Format-TaskResult $info.LastTaskResult))
+            Write-Host ("        triggers: at logon + watchdog every {0}min; next {1}" -f `
+                    5, $info.NextRunTime)
         } else {
             Write-Host "task:   not registered  (run: .\service.ps1 install)" -ForegroundColor Yellow
         }
