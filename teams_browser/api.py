@@ -233,6 +233,7 @@ class Handler(BaseHTTPRequestHandler):
         if length > MAX_BODY:
             raise HttpError(413, "body too large")
         raw = self.rfile.read(length).decode("utf-8") if length else ""
+        self._body_read = True
         if not raw.strip():
             return {k: v[0] for k, v in query.items() if k != "token"}
         try:
@@ -242,6 +243,42 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(data, dict):
             raise HttpError(400, "body must be a JSON object")
         return data
+
+    def _drain_body(self):
+        """Swallow a request body no handler got round to reading.
+
+        On a keep-alive connection an unread body is still sitting in the
+        socket when we answer, so the *next* request on that connection starts
+        parsing in the middle of it and comes back as a nonsense 400 --
+        `Bad request syntax ('{"wait": 60, ...}GET /health HTTP/1.1')`. It
+        takes a rejection before the body is read to get there (a 401, a 404,
+        a 413) plus something that reuses connections, which is why this stayed
+        invisible until the service was put behind a reverse proxy.
+        """
+        if getattr(self, "_body_read", True):
+            return
+        if (self.headers.get("Transfer-Encoding") or "").lower() == "chunked":
+            self.close_connection = True   # we never learned to read those
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self.close_connection = True   # unparseable: cannot find the end
+            return
+        if length <= 0:
+            return
+        if length > MAX_BODY:
+            # Reading it only to discard it is exactly what the 413 refused.
+            self.close_connection = True
+            return
+        try:
+            while length > 0:
+                chunk = self.rfile.read(min(length, 65536))
+                if not chunk:
+                    break
+                length -= len(chunk)
+        except OSError:
+            self.close_connection = True
 
     # --- dispatch ---------------------------------------------------------
     def do_OPTIONS(self):
@@ -264,6 +301,7 @@ class Handler(BaseHTTPRequestHandler):
         path = unquote(parsed.path).rstrip("/") or "/"
         query = parse_qs(parsed.query)
         svc = self.service
+        self._body_read = False
         try:
             if path not in ("/", "/health") and not svc.authorised(self.headers, query):
                 raise HttpError(401, "missing or wrong API token; see "
@@ -292,6 +330,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.fail(500, "%s: %s" % (type(e).__name__, e))
             except OSError:
                 self.close_connection = True
+        finally:
+            # Every exit above may have answered without touching the body.
+            self._drain_body()
 
     def _route(self, method: str, path: str):
         table = {

@@ -134,6 +134,66 @@ reloaded = MentionStore(store3.path)
 eq("a claim left behind by a dead session comes back as pending",
    reloaded.get("x")["state"], "pending")
 
+# --- keep-alive and an unread request body -------------------------------
+# A request rejected before its body is read (401, 404, 413) used to answer
+# and leave that body sitting in the socket. On a keep-alive connection the
+# next request then began parsing in the middle of it, and came back as
+# `Bad request syntax ('{"wait": 60, ...}GET /health HTTP/1.1')`. It needs a
+# real socket and two pipelined requests to reproduce, which is why it stayed
+# hidden until the service went behind a connection-reusing reverse proxy.
+import re
+import socket
+
+from teams_browser.api import Handler, Server
+
+
+class _RejectingService:
+    """Enough Service for the auth check to run and say no."""
+    cfg = {"auth": True, "token": "the-right-token", "port": 0}
+
+    def authorised(self, headers, query):
+        return False
+
+
+Handler.service = _RejectingService()
+_srv = Server(("127.0.0.1", 0), Handler)
+_srv.quiet = True
+threading.Thread(target=_srv.serve_forever, daemon=True).start()
+
+_body = b'{"wait": 60, "worker": "test"}'
+_pipelined = (
+    b"POST /mentions/next HTTP/1.1\r\nHost: t\r\n"
+    b"Content-Type: application/json\r\n"
+    b"Content-Length: " + str(len(_body)).encode() + b"\r\n\r\n" + _body +
+    b"GET /status HTTP/1.1\r\nHost: t\r\n\r\n"
+)
+
+_sock = socket.create_connection(_srv.server_address[:2], timeout=10)
+_sock.sendall(_pipelined)
+_sock.settimeout(5)
+_seen = b""
+try:
+    while _seen.count(b"HTTP/1.1 ") < 2:
+        _chunk = _sock.recv(65536)
+        if not _chunk:
+            break
+        _seen += _chunk
+except socket.timeout:
+    pass
+_sock.close()
+_srv.shutdown()
+Handler.service = None
+
+# Not splitlines(): a Content-Length body has no trailing newline, so the
+# second response begins on the same line the first one ended on.
+_codes = re.findall(r"HTTP/1\.1 (\d{3})", _seen.decode("latin-1"))
+# Both are 401s: the point is that the second was *parsed*, not that it passed.
+eq("an unread body does not corrupt the next request on the connection",
+   _codes, ["401", "401"])
+eq("no bad-request-syntax after a rejected body",
+   b"Bad request syntax" in _seen, False)
+
+
 print()
 if fails:
     print("FAILURES:")
