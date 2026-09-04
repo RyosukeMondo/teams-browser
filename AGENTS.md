@@ -95,6 +95,22 @@ the viewer is an ordinary web page and no VNC client is needed:
 ./login-vnc.sh stop       # leave it stopped; the bridge keeps running
 ```
 
+**Chrome is launched with `--password-store=basic` on Linux, and that is
+load-bearing.** Chrome otherwise asks the desktop Secret Service
+(gnome-keyring, kwallet) over D-Bus for the key it encrypts cookies with.
+With nobody logged in there is nothing on the other end and Chrome wedges
+*before the first navigation commits*: the omnibox shows the target URL, the
+document is still `about:blank` with `readyState` complete, and
+`performance.getEntriesByType('resource')` is empty. It reads exactly like a
+DNS or firewall problem — `curl` to the same host from the same box answers in
+100 ms — so check this before you go looking at the network.
+
+The same flag is what lets the sign-in survive a logout: a keyring-encrypted
+profile is unreadable the moment the session holding the key ends. Switching
+the store on an existing profile invalidates its cookies, so it is decided
+before the human signs in, not after. `TEAMS_BROWSER_ARGS` is the escape hatch
+for other machine-specific flags.
+
 Both halves bind `127.0.0.1` only and there is deliberately no VNC password:
 the boundary is the SSH tunnel, not a password typed over a LAN. Do not
 "improve" this by binding `0.0.0.0` — that would put a signed-in Teams session

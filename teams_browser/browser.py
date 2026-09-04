@@ -151,6 +151,25 @@ def launch_browser(port: int = DEFAULT_PORT, profile: Path = PROFILE_DIR,
         "--disable-features=Translate",
         "--remote-allow-origins=*",
     ]
+    if sys.platform.startswith("linux"):
+        # Chrome asks the desktop's Secret Service -- gnome-keyring, kwallet --
+        # over D-Bus for the key it encrypts the cookie store with. On a box
+        # where nobody is logged in, which is the entire point of running this
+        # as a service, nothing answers that call and Chrome wedges *before the
+        # first navigation commits*: the tab shows the target URL in the
+        # omnibox while the document is still about:blank, readyState complete,
+        # zero resources fetched. It looks exactly like a network problem and
+        # is not one.
+        #
+        # `basic` keeps the key in the profile instead. That is also what lets
+        # a signed-in profile survive a logout -- with a keyring-encrypted
+        # profile the cookies become unreadable the moment the desktop session
+        # that holds the key goes away. Do not "upgrade" this to gnome-libsecret
+        # without moving the sign-in somewhere a keyring is always unlocked.
+        args.append("--password-store=basic")
+    # An escape hatch for machine-specific flags -- a proxy, --disable-gpu on a
+    # cranky virtual display -- without editing this list.
+    args += os.environ.get("TEAMS_BROWSER_ARGS", "").split()
     if headless:
         # Headless still needs a real viewport: Teams virtualises its lists.
         args += ["--headless=new", "--window-size=1440,960"]

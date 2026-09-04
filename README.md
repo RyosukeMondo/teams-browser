@@ -298,6 +298,15 @@ How the pieces fit:
   `127.0.0.1`, so you reach them over an SSH tunnel and a signed-in Teams
   session is never exposed to the network. Stop it when you are done.
 
+One flag in the browser launch is load-bearing on Linux:
+**`--password-store=basic`**. Chrome normally asks the desktop keyring for the
+key it encrypts cookies with, and on a box with nobody logged in that D-Bus
+call has no answer — Chrome then hangs before the first navigation commits,
+showing the URL in the omnibox over an `about:blank` document that fetched
+nothing. It looks like a network fault and is not one. Keeping the key in the
+profile is also what lets a signed-in session outlive the desktop session that
+created it.
+
 `KillMode=process` in the unit is deliberate: the browser is started by the
 bridge but outlives it, so restarting the service re-attaches to a warm Teams
 instead of reloading it. `service.sh uninstall` is the one that does take the
