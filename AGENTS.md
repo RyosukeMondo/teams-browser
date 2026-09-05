@@ -75,7 +75,7 @@ Then, once — a human must be at the keyboard:
 On a headless Linux box there is no window to sign into, so put a viewer in
 front of the virtual display first (see **Signing in on a headless box**).
 
-Verify with `.\teams.ps1 selftest` / `./teams selftest` — expect `16/16 passed`.
+Verify with `.\teams.ps1 selftest` / `./teams selftest` — expect `17/17 passed`.
 
 **A profile cannot be moved between platforms.** Chrome on Windows encrypts
 its cookie store with a DPAPI key bound to that Windows account; copying
@@ -170,11 +170,24 @@ Use `--json` for anything you intend to parse.
 
 ```json
 {"id": "1787486470200", "author": "Sam Rivera", "mine": false,
- "time": "2026-08-23T12:01:10.200Z", "text": "see you then"}
+ "time": "2026-08-23T12:01:10.200Z", "text": "see you then",
+ "attachments": [{"index": 0, "kind": "image", "src": "https://...asm.skype.com/v1/objects/0-.../views/imgo",
+                  "name": null, "width": 1280, "height": 720, "img_index": 0}]}
 ```
 
 `time` is an ISO-8601 UTC timestamp when Teams provides one. `mine` is true for
-messages sent by the signed-in account.
+messages sent by the signed-in account. `attachments` lists the pictures (and
+OneDrive/SharePoint file cards, `kind: "file"`) in the message; emoji, URL
+previews and avatars are not attachments. A message that is only a picture has
+empty `text` and is still returned. `src` is behind the session's cookies and
+is useless outside the browser -- fetch the bytes with:
+
+```powershell
+.\teams.ps1 attachment <message-id> --chat "Sam" --index 0      # -> out\attachments\<id>-0.png
+```
+
+over the REST service, `GET /mentions/{id}/attachments/{n}` or
+`GET /attachments?chat=&message=&index=` (see **Attachments**, below).
 
 `--json search <term>` → array of:
 
@@ -193,7 +206,7 @@ Titles may be in any language and may contain full-width characters.
 
 ## Debugging, in order
 
-1. `.\teams.ps1 selftest` — 16 checks; tells you which capability broke.
+1. `.\teams.ps1 selftest` — 17 checks; tells you which capability broke.
 2. `.\teams.ps1 status` — is the browser up and signed in.
 3. `.\teams.ps1 probe` — which candidate selectors currently match, per frame,
    plus the most common `data-tid` values on the page.
@@ -201,7 +214,7 @@ Titles may be in any language and may contain full-width characters.
 
 If Teams changed its DOM, add the working selector to the **head** of the right
 list in `teams_browser/teams.py` (`CHAT_LIST_ITEM`, `MESSAGE_ITEM`, `COMPOSER`,
-`SEND_BUTTON`, `SEARCH_BOX`, `SEARCH_RESULT_CARD`). That file is the only place
+`SEND_BUTTON`, `SEARCH_BOX`, `SEARCH_RESULT_CARD`, `ATTACHMENT_IMAGE`). That file is the only place
 selectors live. Re-run `selftest` afterwards.
 
 ## The REST service (`serve`)
@@ -317,6 +330,27 @@ only sets a cursor — it will not reply to a backlog.
 `answered` (`/reply` or `/ack`) or `failed`. A claim orphaned by a dead session
 returns to `pending` at restart, or via `/release`.
 
+### Attachments
+
+A job carries `attachments`: the pictures in the anchored message, plus those
+in any picture-only bubbles the same author posted immediately before or after
+it (dropping a screenshot into Teams usually makes its own bubble). Each entry
+records `message_id` and `slot` -- where it actually lives -- and a job-level
+`index`.
+
+The bytes are fetched **inside the signed-in browser**: Teams serves images
+from `*.asm.skype.com` / `asyncgw` behind the session's own cookies, or as
+`blob:` URLs that exist only in that tab, so nothing outside the page can
+download them. `Teams.fetch_attachment` tries, in order, a page-context `fetch`
+(original bytes; handles `blob:`), Playwright's request context (no CORS,
+shares the cookie jar), and finally an element screenshot of the rendered
+`<img>` (lower resolution, never empty). The response says which one worked in
+`X-Attachment-Via`, and carries the image's own `Content-Type` and a safe
+`Content-Disposition` filename.
+
+The message must be on screen: the fetch opens the chat and scrolls back up
+to 8 rounds of history looking for it, then gives up with a 409.
+
 Use `tools/teams_interface.py` rather than raw curl — stdlib only, runs anywhere
 on the LAN, resolves URL and token from `teams-interface.json` or
 `TEAMS_INTERFACE_URL` / `TEAMS_INTERFACE_TOKEN`:
@@ -324,6 +358,7 @@ on the LAN, resolves URL and token from `teams-interface.json` or
 ```bash
 python tools/teams_interface.py next --wait 60     # exit 4 = nothing waiting
 python tools/teams_interface.py reply <id> "done"  # server adds the prefix
+python tools/teams_interface.py attachment <id>    # save its images to out/attachments/
 python tools/teams_interface.py status             # browser + watcher + queue
 ```
 
@@ -362,11 +397,11 @@ handlers submit a callable and block, they never hold a `Page`.
 
 ```powershell
 .\.venv\Scripts\python.exe tests\test_bridge.py   # offline, no browser, no network
-.\teams.ps1 selftest                              # the browser half, 16 checks
+.\teams.ps1 selftest                              # the browser half, 17 checks
 ```
 ```bash
 ./.venv/bin/python tests/test_bridge.py            # offline, no browser, no network
-./teams selftest                                   # the browser half, 16 checks
+./teams selftest                                   # the browser half, 17 checks
 ```
 
 `test_bridge.py` covers what `selftest` structurally cannot: which messages
@@ -380,5 +415,11 @@ spamming a real person. Extend it whenever you touch `watcher.py`.
   conversation long enough to force Teams to fetch an older page.
 * The `unread` flag has never observed a positive; `false` means "no marker
   found", not "definitely read".
-* Channels/Teams tabs, threads, attachments, reactions, edit and delete are not
-  implemented. Chats only.
+* Channels/Teams tabs, threads, reactions, edit and delete are not implemented.
+  Chats only. Attachments are read-only: pictures and file cards can be listed
+  and downloaded, nothing can be uploaded.
+* The attachment extractor was tuned against a Teams DOM that, at the time,
+  held no real picture -- its exclusions (emoji, URL previews, avatars) are
+  verified, its positive selectors are from knowledge of Teams' AMS image
+  markup. If `attachments` stays `[]` for a message that visibly has a
+  picture, run `probe` and add the working selector to `ATTACHMENT_IMAGE`.

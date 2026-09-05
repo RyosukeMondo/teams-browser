@@ -94,8 +94,9 @@ Global flags go **before** the subcommand: `.\teams.ps1 --json read "Sam"`.
 | `read [chat]` | dump messages from a chat; `--history N` scrolls up for older ones |
 | `search <term>` | search messages across every chat (read-only) |
 | `send <chat> <text>` | **sends a message**; `--dry-run` types it without sending |
+| `attachment <msg-id>` | list the pictures/files in a message, or `--index N` to save one to `out\attachments\` |
 | `serve` | run the REST bridge on the LAN (see below); `.\teams-api.ps1` is a shortcut |
-| `selftest` | 16 checks over every path except the actual send |
+| `selftest` | 17 checks over every path except the actual send |
 | `probe` | which candidate selectors match right now, per frame |
 | `shot [path]` | screenshot the tab |
 
@@ -262,7 +263,7 @@ twice.
 
 ```powershell
 .\.venv\Scripts\python.exe tests\test_bridge.py   # offline: the queueing rules
-.\teams.ps1 selftest                              # the browser half, 16 checks
+.\teams.ps1 selftest                              # the browser half, 17 checks
 ```
 
 ---
@@ -354,7 +355,7 @@ attaching no longer yanks a minimized window back onto your desktop.
 ```
 
 Measured on a daily-use Windows 11 desktop, Chrome 151, same account and the
-same 16-check selftest each time:
+same 17-check selftest each time:
 
 | how it runs | RAM | notes |
 | --- | --- | --- |
@@ -445,8 +446,13 @@ relies on:
 * **The `unread` flag.** No chat was unread while this was built, so the
   detection has never seen a positive. Read a `false` as "no unread marker
   found", not as "definitely read".
-* **Channels and Teams (the tabs), threads, attachments, reactions, editing and
+* **Channels and Teams (the tabs), threads, reactions, editing and
   deleting.** Not implemented — this covers 1:1 and group *chats* only.
+* **Attachments are read-only.** Pictures (and OneDrive file cards) in a
+  message are listed under `attachments` and can be downloaded — the bytes are
+  fetched inside the signed-in browser, since Teams serves them behind the
+  session's cookies — but nothing can be uploaded. The bridge hands a job's
+  pictures to the Claude session (`teams_interface.py attachment <id>`).
 
 ## Troubleshooting
 

@@ -17,7 +17,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from teams_browser.watcher import MentionStore, Watcher, match_anchor, newer
+from teams_browser.watcher import (MentionStore, Watcher, gather_attachments,
+                                   match_anchor, newer)
 
 fails = []
 
@@ -95,6 +96,76 @@ eq("cursor advanced past everything seen",
 
 eq("re-polling the same batch does not duplicate", w.poll_once(), [])
 eq("queue holds exactly one pending job", store.counts()["pending"], 1)
+
+eq("a job without pictures still carries an attachments list",
+   second[0]["attachments"], [])
+
+# --- attachments ---------------------------------------------------------
+# A screenshot pasted into Teams is often its own bubble, right before or
+# after the words. The job must pick those up, each tagged with the message
+# it lives in, and never hand one bubble to two jobs.
+def pic(mid, author="miyachi haruna", n=1):
+    m = msg(mid, "", author=author)
+    m["attachments"] = [{"index": i, "kind": "image", "src": "blob:%s-%d" % (mid, i)}
+                        for i in range(n)]
+    return m
+
+
+def withpic(mid, text, author="miyachi haruna"):
+    m = msg(mid, text, author=author)
+    m["attachments"] = [{"index": 0, "kind": "image", "src": "blob:%s" % mid}]
+    return m
+
+
+store4 = store_in_tmp()
+w4 = Watcher(FakeWorker([
+    [msg("200", "seed")],
+    [msg("200", "seed"),
+     pic("201"),                                        # before, same author
+     withpic("202", "@claude does this look right?"),   # the job, own picture
+     pic("203", n=2),                                   # after, two pictures
+     pic("204", author="Someone Else"),                 # after, other author
+     msg("205", "@claude second job"),
+     pic("206")],
+]), store4, cfg)
+w4.poll_once()
+jobs = w4.poll_once()
+eq("two jobs from the batch", [j["message_id"] for j in jobs], ["202", "205"])
+first, second_job = jobs
+eq("job absorbs its own and the adjacent same-author picture bubbles",
+   [(a["message_id"], a["slot"]) for a in first["attachments"]],
+   [("201", 0), ("202", 0), ("203", 0), ("203", 1)])
+eq("job-level index is contiguous",
+   [a["index"] for a in first["attachments"]], [0, 1, 2, 3])
+eq("a stranger's picture is not absorbed",
+   any(a["message_id"] == "204" for a in first["attachments"]), False)
+eq("the following bubble goes to the next job",
+   [a["message_id"] for a in second_job["attachments"]], ["206"])
+
+# A bubble sitting between two jobs belongs to the first, never both.
+shared = [withpic("300", "@claude a"), pic("301"), msg("302", "@claude b")]
+absorbed = set()
+eq("picture between two jobs: first job takes it",
+   [a["message_id"] for a in gather_attachments(shared, 0, absorbed)], ["300", "301"])
+eq("picture between two jobs: second job does not",
+   gather_attachments(shared, 2, absorbed), [])
+
+# --- attachment filenames -----------------------------------------------
+from teams_browser.api import attachment_filename
+
+eq("filename: Teams' default alt text is not a name",
+   attachment_filename({"content_type": "image/png",
+                        "attachment": {"kind": "image", "name": "image"}}, "17", 0),
+   "17-0.png")
+eq("filename: a real name keeps itself and gains the extension",
+   attachment_filename({"content_type": "image/jpeg",
+                        "attachment": {"kind": "image", "name": "login screen"}}, "17", 1),
+   "login_screen.jpg")
+eq("filename: no path separators survive",
+   attachment_filename({"content_type": "image/png",
+                        "attachment": {"kind": "file", "name": "../../etc/passwd"}}, "17", 0),
+   "etc_passwd.png")
+
 
 # --- the `from` filter ---------------------------------------------------
 store2 = store_in_tmp()

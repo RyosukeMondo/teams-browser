@@ -195,6 +195,54 @@ def match_anchor(text: str, anchor: str):
     return True, ("%s %s" % (head, tail)).strip() if head else tail.strip()
 
 
+def _attachment_only(m: dict) -> bool:
+    return bool(m.get("attachments")) and not (m.get("text") or "").strip()
+
+
+def gather_attachments(messages: list, i: int, absorbed: set = None) -> list:
+    """Attachments that belong to the job at `messages[i]`.
+
+    A picture dropped into Teams often lands as its own bubble, right before or
+    right after the words that go with it, so a job takes its own attachments
+    plus those of the *contiguous* text-less messages from the same author on
+    either side. `absorbed` stops one bubble being handed to two jobs. Every
+    attachment records the message it lives in, which is what the fetch route
+    needs -- the job id alone is not enough once neighbours are involved.
+    """
+    absorbed = set() if absorbed is None else absorbed
+    own = messages[i]
+    author = own.get("author")
+
+    def take(m):
+        out = []
+        for a in m.get("attachments") or []:
+            a = dict(a)
+            a["message_id"] = m.get("id")
+            a["slot"] = a.get("index", 0)
+            out.append(a)
+        absorbed.add(m.get("id"))
+        return out
+
+    before = []
+    j = i - 1
+    while j >= 0 and _attachment_only(messages[j]) \
+            and messages[j].get("author") == author \
+            and messages[j].get("id") not in absorbed:
+        before = take(messages[j]) + before
+        j -= 1
+    after = []
+    j = i + 1
+    while j < len(messages) and _attachment_only(messages[j]) \
+            and messages[j].get("author") == author \
+            and messages[j].get("id") not in absorbed:
+        after += take(messages[j])
+        j += 1
+    result = before + take(own) + after
+    for n, a in enumerate(result):
+        a["index"] = n
+    return result
+
+
 class Watcher(threading.Thread):
     """Polls each watched chat on an interval and files new anchor hits."""
 
@@ -278,8 +326,10 @@ class Watcher(threading.Thread):
         cursor = self.store.cursor(chat)
         newest = cursor
         fresh = []
+        messages = data["messages"]
+        absorbed = set()      # attachment-only messages already given to a job
 
-        for m in data["messages"]:
+        for i, m in enumerate(messages):
             mid = m.get("id") or ""
             if not mid:
                 continue
@@ -310,6 +360,7 @@ class Watcher(threading.Thread):
                 "anchor": anchor,
                 "text": text,
                 "body": body,
+                "attachments": gather_attachments(messages, i, absorbed),
                 "state": PENDING,
                 "claimed_by": None,
             })

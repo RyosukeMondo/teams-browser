@@ -54,6 +54,68 @@ SEARCH_RESULT_CARD = [
 ]
 SIGNED_OUT_HINTS = ["login.microsoftonline.com", "login.live.com", "/_#/login"]
 
+# Images a person actually attached to a message. All of these are unioned,
+# not first-match: one message can hold several images rendered differently.
+# The bare `img` at the end is the catch-all and is subject to the size
+# heuristic in ATTACHMENT_JS; the others are trusted as-is.
+ATTACHMENT_IMAGE = [
+    'img[itemtype="http://schema.skype.com/AMSImage"]',
+    'img[src*="/objects/"]',            # AMS: .../v1/objects/<id>/views/imgo
+    'img[src*="asm.skype.com"]',
+    'img[src*="asyncgw"]',
+    'img[src^="blob:"]',                # fetched with a token and re-hosted
+    '[data-tid*="image" i] img',
+    'img',
+]
+# Anything inside these is decoration, not an attachment.
+ATTACHMENT_EXCLUDE = [
+    '[data-tid="emoticon-renderer"]',
+    '[data-tid="url-preview"]',
+    '[data-tid*="reaction" i]',
+    '[data-tid="message-avatar"]',
+    'img[itemtype="http://schema.skype.com/Emoji"]',
+]
+# Links that are file cards (OneDrive / SharePoint) rather than plain URLs.
+ATTACHMENT_FILE_HOSTS = [
+    "sharepoint.com", "1drv.ms", "onedrive.live.com",
+    "my.microsoftpersonalcontent.com", "/download.aspx",
+]
+
+# JS: `attachmentsOf(body)` -> [{index, kind, src|href, name, width, height,
+# img_index}]. Defined once here and spliced into every evaluate() that needs
+# it, so the reader and the fetcher can never disagree about what counts.
+ATTACHMENT_JS = r"""
+const attachmentsOf = (body, cfg) => {
+    const out = [];
+    const trusted = new Set();
+    for (const sel of cfg.image.slice(0, -1)) {
+        try { body.querySelectorAll(sel).forEach(e => trusted.add(e)); } catch (e) {}
+    }
+    const excl = cfg.exclude.join(', ');
+    Array.from(body.querySelectorAll('img')).forEach((img, k) => {
+        if (img.closest(excl)) return;
+        const src = img.currentSrc || img.src || img.getAttribute('data-src') || '';
+        if (!src || src.startsWith('data:image/svg')) return;
+        if (/profilepicture|\/avatar/i.test(src)) return;
+        const w = img.naturalWidth || parseInt(img.getAttribute('width') || '0', 10) || img.clientWidth || 0;
+        const h = img.naturalHeight || parseInt(img.getAttribute('height') || '0', 10) || img.clientHeight || 0;
+        // An untrusted <img> that is tiny is an inline icon, not a picture.
+        if (!trusted.has(img) && w && h && w < 40 && h < 40) return;
+        out.push({kind: 'image', img_index: k, src: src, width: w || null, height: h || null,
+                  name: (img.getAttribute('alt') || img.getAttribute('title') || '').trim() || null,
+                  id: img.getAttribute('itemid') || null});
+    });
+    Array.from(body.querySelectorAll('a[href]')).forEach(a => {
+        const href = a.getAttribute('href') || '';
+        if (!cfg.file_hosts.some(h => href.toLowerCase().includes(h))) return;
+        if (a.closest(excl)) return;
+        const name = ((a.innerText || a.getAttribute('aria-label') || '').trim().split(String.fromCharCode(10))[0] || '').trim();
+        out.push({kind: 'file', href: href, name: name || null});
+    });
+    return out.map((a, i) => Object.assign({index: i}, a));
+};
+"""
+
 # App-bar entries are keyed by stable app GUIDs, so this survives UI language
 # changes (the aria-labels are localised, the ids are not).
 APP_IDS = {
@@ -192,7 +254,7 @@ class Teams:
         frame, sel, _ = self.find(MESSAGE_ITEM)
         if frame is None:
             raise TeamsError("no message list on screen -- open a chat first")
-        js = """([sel, limit]) => {
+        js = ATTACHMENT_JS + """([sel, limit, cfg]) => {
             const nodes = Array.from(document.querySelectorAll(sel));
             return nodes.slice(-limit).map(el => {
                 const group = el.closest('[data-tid="chat-pane-item"]') || el.parentElement || el;
@@ -208,11 +270,129 @@ class Teams:
                     mine: mine,
                     time: t ? (t.getAttribute('datetime') || t.getAttribute('title') || t.innerText.trim()) : null,
                     text: (el.innerText || '').trim(),
+                    attachments: attachmentsOf(el, cfg),
                 };
             });
         }"""
-        msgs = frame.evaluate(js, [sel, limit])
-        return [m for m in msgs if m["text"]]
+        msgs = frame.evaluate(js, [sel, limit, self._attachment_cfg()])
+        # A message that is only a picture has no text and is still a message.
+        return [m for m in msgs if m["text"] or m["attachments"]]
+
+    @staticmethod
+    def _attachment_cfg() -> dict:
+        return {"image": ATTACHMENT_IMAGE, "exclude": ATTACHMENT_EXCLUDE,
+                "file_hosts": ATTACHMENT_FILE_HOSTS}
+
+    # --- attachments -----------------------------------------------------
+    MESSAGE_BODY_ID = "message-body-%s"
+
+    def _message_frame(self, message_id: str):
+        """The frame rendering `message_id`, scrolling back for it if needed."""
+        js = "(id) => !!document.getElementById(id)"
+        dom_id = self.MESSAGE_BODY_ID % message_id
+        for attempt in range(2):
+            for frame in self.frames:
+                try:
+                    if frame.evaluate(js, dom_id):
+                        return frame
+                except Exception:
+                    continue
+            if attempt == 0:
+                # Teams virtualises the list: an older message is simply not in
+                # the DOM until the pane has been scrolled up to it.
+                self.load_history(rounds=8)
+        raise TeamsError("message %s is not on screen -- open its chat first, "
+                         "or it is older than the history that loads" % message_id)
+
+    def list_attachments(self, message_id: str) -> list:
+        frame = self._message_frame(message_id)
+        js = ATTACHMENT_JS + """([id, cfg]) => attachmentsOf(document.getElementById(id), cfg)"""
+        return frame.evaluate(js, [self.MESSAGE_BODY_ID % message_id,
+                                   self._attachment_cfg()])
+
+    def fetch_attachment(self, message_id: str, index: int = 0) -> dict:
+        """Bytes of one attachment, fetched *inside* the page.
+
+        The image URLs Teams renders are behind the session's own cookies
+        (`skypetoken_asm` on asm.skype.com, or a blob: URL that only exists in
+        this tab), so nothing outside the browser can download them. A fetch
+        from the page context sends exactly what the <img> tag sent. If even
+        that is refused, the rendered pixels are screenshotted instead -- lower
+        resolution, but never empty.
+        """
+        frame = self._message_frame(message_id)
+        dom_id = self.MESSAGE_BODY_ID % message_id
+        js = ATTACHMENT_JS + r"""async ([id, index, cfg]) => {
+            const body = document.getElementById(id);
+            const atts = attachmentsOf(body, cfg);
+            const a = atts[index];
+            if (!a) return {ok: false, missing: true, count: atts.length};
+            const url = a.kind === 'image' ? a.src : a.href;
+            const urls = [];
+            // AMS serves a thumbnail view to the chat pane; `imgo` is the
+            // original the person uploaded. Try it first, fall back to
+            // whatever was rendered.
+            if (/\/views\/imgpsh/.test(url)) urls.push(url.replace(/\/views\/[^/?]+/, '/views/imgo'));
+            urls.push(url);
+            let error = null;
+            for (const u of urls) {
+                try {
+                    const r = await fetch(u, {credentials: 'include'});
+                    if (!r.ok) { error = 'HTTP ' + r.status + ' for ' + u; continue; }
+                    const bytes = new Uint8Array(await r.arrayBuffer());
+                    let bin = '';
+                    for (let i = 0; i < bytes.length; i += 0x8000)
+                        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+                    return {ok: true, b64: btoa(bin), type: r.headers.get('content-type') || '',
+                            url: u, size: bytes.length, attachment: a};
+                } catch (e) { error = String(e); }
+            }
+            return {ok: false, error: error, attachment: a};
+        }"""
+        res = frame.evaluate(js, [dom_id, int(index), self._attachment_cfg()])
+        if res.get("missing"):
+            raise TeamsError("message %s has %d attachment(s), no index %d"
+                             % (message_id, res.get("count", 0), index))
+        att = res.get("attachment") or {}
+        if res.get("ok"):
+            import base64
+            return {"bytes": base64.b64decode(res["b64"]),
+                    "content_type": (res.get("type") or "").split(";")[0].strip()
+                                    or "application/octet-stream",
+                    "via": "fetch", "url": res.get("url"), "attachment": att}
+        url = att.get("src") or att.get("href") or ""
+        if url.startswith(("http://", "https://")):
+            # The page could not fetch it (CORS, usually). Playwright's request
+            # context has no CORS and shares the browser's cookie jar, which is
+            # enough for anything served without a per-request token.
+            try:
+                r = self.page.context.request.get(url, timeout=20000)
+                if r.ok:
+                    body = r.body()
+                    ctype = (r.headers.get("content-type") or "").split(";")[0].strip()
+                    if body and not ctype.startswith("text/html"):
+                        return {"bytes": body, "content_type": ctype or
+                                "application/octet-stream", "via": "request",
+                                "url": url, "attachment": att,
+                                "fetch_error": res.get("error")}
+                res["error"] = "%s; request context: HTTP %s" % (res.get("error"), r.status)
+            except Exception as e:
+                res["error"] = "%s; request context: %s" % (res.get("error"), e)
+        if att.get("kind") == "image" and att.get("img_index") is not None:
+            # The <img> is on screen even when its URL will not talk to us.
+            loc = frame.locator("#%s img" % dom_id).nth(att["img_index"])
+            try:
+                loc.scroll_into_view_if_needed(timeout=5000)
+                png = loc.screenshot(type="png", timeout=15000)
+            except Exception as e:
+                raise TeamsError("attachment %d of %s: fetch failed (%s) and the "
+                                 "screenshot fallback failed too (%s)"
+                                 % (index, message_id, res.get("error"), e))
+            return {"bytes": png, "content_type": "image/png", "via": "screenshot",
+                    "url": att.get("src"), "attachment": att,
+                    "fetch_error": res.get("error")}
+        raise TeamsError("attachment %d of %s could not be fetched: %s"
+                         % (index, message_id, res.get("error")))
 
     def current_chat_title(self):
         js = """() => {
@@ -459,6 +639,7 @@ class Teams:
             "composer": COMPOSER,
             "send_button": SEND_BUTTON,
             "search_box": SEARCH_BOX,
+            "attachment_image": ATTACHMENT_IMAGE,
         }
         out = {
             "url": self.page.url,

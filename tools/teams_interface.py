@@ -8,6 +8,7 @@ talks HTTP.
 
     python tools/teams_interface.py next --wait 60      # claim a job (JSON)
     python tools/teams_interface.py reply <id> "done"   # answer and close it
+    python tools/teams_interface.py attachment <id>     # save the job's images
     python tools/teams_interface.py say "haruna" "hi"   # unprompted message
     python tools/teams_interface.py docs                # the server's own docs
 
@@ -26,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -86,7 +88,8 @@ class Client:
         self.timeout = timeout
 
     # --- transport --------------------------------------------------------
-    def request(self, method, path, params=None, body=None, raw=False):
+    def request(self, method, path, params=None, body=None, raw=False,
+                with_headers=False):
         target = self.url + path
         if params:
             clean = {k: v for k, v in params.items() if v is not None}
@@ -103,6 +106,8 @@ class Client:
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 payload = r.read()
+                if with_headers:
+                    return payload, dict(r.headers)
                 if r.status == 204 or not payload:
                     return None
                 if raw:
@@ -179,12 +184,57 @@ class Client:
     def events(self, limit=50):
         return self.request("GET", "/events", {"limit": limit})
 
+    def mention(self, mention_id):
+        return self.request("GET", "/mentions/%s" % mention_id)
+
+    def attachments(self, mention_id):
+        """The attachment list a job carries (no bytes)."""
+        return self.request("GET", "/mentions/%s/attachments" % mention_id)
+
+    def attachment(self, mention_id, index, path):
+        """Download attachment `index` of a job to `path`.
+
+        `path` may be a directory, in which case the server's filename is used.
+        Returns the path written and the headers, which say how the server
+        got the bytes (`X-Attachment-Via`: fetch, request, or screenshot).
+        """
+        data, headers = self.request(
+            "GET", "/mentions/%s/attachments/%d" % (mention_id, index),
+            with_headers=True)
+        return _write_download(path, data, headers), headers
+
+    def message_attachment(self, chat, message_id, index, path):
+        """Same, for any message: by chat title and message id."""
+        data, headers = self.request(
+            "GET", "/attachments",
+            {"chat": chat, "message": message_id, "index": index},
+            with_headers=True)
+        return _write_download(path, data, headers), headers
+
     def screenshot(self, path, full=False):
         png = self.request("GET", "/screenshot",
                            {"full": "1" if full else None}, raw=True)
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_bytes(png)
         return path
+
+
+def _filename_from(headers, fallback="attachment.bin"):
+    cd = headers.get("Content-Disposition") or headers.get("content-disposition") or ""
+    m = re.search(r"filename\*=UTF-8''([^;]+)", cd)
+    if m:
+        return urllib.parse.unquote(m.group(1))
+    m = re.search(r'filename="?([^";]+)"?', cd)
+    return m.group(1) if m else fallback
+
+
+def _write_download(path, data, headers):
+    path = Path(path)
+    if path.is_dir() or str(path).endswith(("/", os.sep)):
+        path = path / _filename_from(headers)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return str(path)
 
 
 # --- CLI -----------------------------------------------------------------
@@ -195,6 +245,30 @@ def _print(obj):
         print(json.dumps(obj, ensure_ascii=False, indent=2))
     else:
         print(obj)
+
+
+def _cmd_attachment(c, a):
+    """Print one line per file written: `<path>  <via>`; exit 1 if none."""
+    if a.message:
+        if not a.chat:
+            raise ApiError(400, {"error": "--message needs --chat"})
+        dest = a.out if a.index is not None else a.out.rstrip("/") + "/"
+        path, h = c.message_attachment(a.chat, a.message, a.index or 0, dest)
+        print("%s  %s" % (path, h.get("X-Attachment-Via", "")))
+        return
+    if not a.id:
+        raise ApiError(400, {"error": "pass a job id, or --chat and --message"})
+    if a.index is not None:
+        path, h = c.attachment(a.id, a.index, a.out)
+        print("%s  %s" % (path, h.get("X-Attachment-Via", "")))
+        return
+    atts = (c.attachments(a.id) or {}).get("attachments") or []
+    if not atts:
+        print("job %s has no attachments" % a.id, file=sys.stderr)
+        raise ApiError(404, {"error": "no attachments on %s" % a.id})
+    for att in atts:
+        path, h = c.attachment(a.id, att["index"], a.out.rstrip("/") + "/")
+        print("%s  %s" % (path, h.get("X-Attachment-Via", "")))
 
 
 def main(argv=None):
@@ -267,6 +341,16 @@ def main(argv=None):
     s = sub.add_parser("events", help="recent server activity")
     s.add_argument("--limit", type=int, default=50)
 
+    s = sub.add_parser("attachment",
+                       help="download a job's attachments (images someone sent)")
+    s.add_argument("id", nargs="?", help="job id from `next`")
+    s.add_argument("--index", type=int, default=None,
+                   help="one attachment only (default: all of them)")
+    s.add_argument("--chat", default=None, help="instead of a job: chat title")
+    s.add_argument("--message", default=None, help="instead of a job: message id")
+    s.add_argument("--out", default="out/attachments",
+                   help="directory, or a file path when --index is given")
+
     s = sub.add_parser("shot", help="save a screenshot of the Teams tab")
     s.add_argument("path", nargs="?", default="out/teams-interface.png")
     s.add_argument("--full", action="store_true")
@@ -325,6 +409,8 @@ def main(argv=None):
             _print(c.poll())
         elif a.cmd == "events":
             _print(c.events(a.limit))
+        elif a.cmd == "attachment":
+            _cmd_attachment(c, a)
         elif a.cmd == "shot":
             print(c.screenshot(a.path, a.full))
     except ApiError as e:

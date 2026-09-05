@@ -21,6 +21,7 @@ job blocks server-side until one exists, so an idle listener costs nothing.
 python tools/teams_interface.py health              # is the server up
 python tools/teams_interface.py next --wait 60      # claim a job; exit 4 = none
 python tools/teams_interface.py reply <id> "text"   # answer in chat, close job
+python tools/teams_interface.py attachment <id>     # save the job's pictures
 python tools/teams_interface.py ack <id> --note "…" # close without replying
 python tools/teams_interface.py fail <id> --error "…"
 python tools/teams_interface.py release <id>        # put it back on the queue
@@ -42,7 +43,16 @@ name) · `4` nothing waiting · `5` server unreachable.
    Exit 4 means the queue was empty for 60 s — that is the normal quiet case.
    Say so in one short line and stop; do not retry in a spin.
 2. **Read the job.** The JSON gives `id`, `chat`, `author`, `body` (the message
-   with the anchor stripped), `text` (verbatim), `sent_at`.
+   with the anchor stripped), `text` (verbatim), `sent_at`, and `attachments`.
+   If `attachments` is not empty, the person sent pictures (a screenshot,
+   usually) -- download them and *look* at them before doing anything:
+   ```bash
+   python tools/teams_interface.py attachment <id>   # -> out/attachments/<file>  <via>
+   ```
+   then open each file with the Read tool. `via` is `fetch` or `request` for
+   the original bytes, `screenshot` when only the rendered pixels could be had.
+   A picture-only bubble the same person posted right before or after the
+   message is already included.
 3. **Do the work** in this repo, as you would for any request typed at you.
 4. **Answer.** `python tools/teams_interface.py reply <id> "<what you did>"`
    The server prefixes `[claude-code]` itself — do not add it yourself.

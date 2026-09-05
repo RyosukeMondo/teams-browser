@@ -190,6 +190,28 @@ def cmd_search(a):
     return _with_teams(a, run)
 
 
+def cmd_attachment(a):
+    """Save one attachment of a message (an image someone sent) to disk."""
+    def run(t):
+        if a.chat:
+            t.open_chat(a.chat)
+        if a.index is None:
+            atts = t.list_attachments(a.message)
+            _out(atts, True)
+            return 0
+        out = t.fetch_attachment(a.message, a.index)
+        from .api import attachment_filename
+        path = Path(a.out) if a.out else Path("out/attachments")
+        if a.out is None or path.is_dir():
+            path = path / attachment_filename(out, a.message, a.index)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(out["bytes"])
+        print("%s  (%s, %s, %d bytes)" % (path, out["content_type"], out["via"],
+                                          len(out["bytes"])))
+        return 0
+    return _with_teams(a, run)
+
+
 def cmd_selftest(a):
     """Exercise every path except the actual send. Safe to run any time."""
     def run(t):
@@ -213,6 +235,10 @@ def cmd_selftest(a):
             if msgs:
                 chk("message has timestamp", lambda: any(m["time"] for m in msgs))
                 chk("message has author", lambda: any(m["author"] for m in msgs))
+                # No picture may be on screen, but the extractor must run: a
+                # `None` here means the JS threw and every image would be lost.
+                chk("attachments extracted",
+                    lambda: all(isinstance(m.get("attachments"), list) for m in msgs))
             chk("composer clears", t.clear_composer)
             chk("compose replaces draft", lambda: (
                 t.compose("selftest draft A"),
@@ -386,6 +412,16 @@ def build_parser():
     s.add_argument("--limit", type=int, default=20)
     s.add_argument("--keep", action="store_true", help="leave the search box populated")
     s.set_defaults(func=cmd_search)
+
+    s = sub.add_parser("attachment",
+                       help="list or save the images/files attached to a message")
+    s.add_argument("message", help="message id, as shown by `--json read`")
+    s.add_argument("--chat", default=None, help="substring of the chat title")
+    s.add_argument("--index", type=int, default=None,
+                   help="which attachment to save (omit to list them as JSON)")
+    s.add_argument("--out", default=None,
+                   help="file, or directory (default out/attachments)")
+    s.set_defaults(func=cmd_attachment)
 
     s = sub.add_parser("selftest", help="check every path except send (sends nothing)")
     s.add_argument("--chat", default=None, help="chat to exercise (default: first)")

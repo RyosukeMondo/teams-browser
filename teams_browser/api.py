@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import apidocs, config as cfgmod
 from .mdns import Advertiser, lan_ip
@@ -107,6 +107,28 @@ class Service:
         return self.worker.submit(
             lambda t: t.page.screenshot(full_page=full), timeout=120)
 
+    def attachment(self, chat, message_id: str, index: int) -> dict:
+        """One attachment's bytes, plus a filename to hand it out under."""
+        def run(t):
+            if chat:
+                t.open_chat(chat)
+            return t.fetch_attachment(message_id, index)
+        out = self.worker.submit(run, timeout=240)
+        out["filename"] = attachment_filename(out, message_id, index)
+        return out
+
+    def mention_attachment(self, mid: str, index: int) -> dict:
+        m = self.store.get(mid)
+        if m is None:
+            raise HttpError(404, "no mention %r" % mid)
+        atts = m.get("attachments") or []
+        if index < 0 or index >= len(atts):
+            raise HttpError(404, "mention %s has %d attachment(s), no index %d"
+                            % (mid, len(atts), index), attachments=atts)
+        a = atts[index]
+        return self.attachment(m["chat"], a.get("message_id") or m["message_id"],
+                               int(a.get("slot", 0)))
+
     # --- composites -------------------------------------------------------
     def status(self) -> dict:
         signed_in = None
@@ -164,6 +186,26 @@ class Service:
         self.worker.stop()
         if self.advertiser:
             self.advertiser.stop()
+
+
+_EXT = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif",
+        "image/webp": "webp", "image/bmp": "bmp", "image/svg+xml": "svg",
+        "application/pdf": "pdf"}
+
+
+def attachment_filename(out: dict, message_id: str, index: int) -> str:
+    """A safe, unique name: the attachment's own name if it has one."""
+    att = out.get("attachment") or {}
+    ext = _EXT.get(out.get("content_type") or "", "")
+    name = att.get("name") or ""
+    if att.get("kind") == "image" and name.lower() in ("", "image", "画像", "img"):
+        name = ""            # Teams' default alt text, not a real filename
+    name = re.sub(r"[^\w.\-]+", "_", name, flags=re.UNICODE).strip("._")[:80]
+    if not name:
+        name = "%s-%d" % (message_id, index)
+    if ext and not name.lower().endswith("." + ext):
+        name += "." + ext
+    return name
 
 
 def _one(query: dict, key: str, default=None):
@@ -355,11 +397,26 @@ class Handler(BaseHTTPRequestHandler):
             ("POST", "/watch/poll"): self.h_poll,
             ("GET", "/events"): self.h_events,
             ("GET", "/screenshot"): self.h_screenshot,
+            ("GET", "/attachments"): self.h_attachment,
         }
         if (method, path) in table:
             return table[(method, path)]
         # /chats/<name>/messages -- convenient, though ?chat= avoids having to
         # URL-encode titles that are in Japanese or hold full-width spaces.
+        m = re.fullmatch(r"/chats/(.+)/messages/([^/]+)/attachments/(\d+)", path)
+        if m and method == "GET":
+            return lambda q, p: self.h_attachment(
+                q, p, chat=m.group(1), message_id=m.group(2), index=int(m.group(3)))
+        m = re.fullmatch(r"/messages/([^/]+)/attachments/(\d+)", path)
+        if m and method == "GET":
+            return lambda q, p: self.h_attachment(
+                q, p, message_id=m.group(1), index=int(m.group(2)))
+        m = re.fullmatch(r"/mentions/([^/]+)/attachments(?:/(\d+))?", path)
+        if m and method == "GET" and m.group(1) != "next":
+            if m.group(2) is None:
+                return lambda q, p: self.h_mention_attachments(q, p, m.group(1))
+            return lambda q, p: self.h_mention_attachment(q, p, m.group(1),
+                                                          int(m.group(2)))
         m = re.fullmatch(r"/chats/(.+)/messages", path)
         if m and method == "GET":
             return lambda q, p: self.h_messages(q, p, chat=m.group(1))
@@ -530,6 +587,35 @@ class Handler(BaseHTTPRequestHandler):
     def h_screenshot(self, query, path):
         png = self.service.screenshot(full=_flag(query, "full"))
         return self._send(200, png, "image/png")
+
+    def _send_attachment(self, out: dict):
+        att = out.get("attachment") or {}
+        headers = {
+            "Content-Disposition": "attachment; filename*=UTF-8''%s"
+                                   % quote(out["filename"]),
+            "X-Attachment-Via": out.get("via", ""),
+            "X-Attachment-Kind": att.get("kind", ""),
+        }
+        if out.get("fetch_error"):
+            headers["X-Attachment-Fetch-Error"] = str(out["fetch_error"])[:300]
+        return self._send(200, out["bytes"], out["content_type"], headers)
+
+    def h_attachment(self, query, path, chat=None, message_id=None, index=0):
+        chat = chat or _one(query, "chat")
+        message_id = message_id or _one(query, "message")
+        if not message_id:
+            raise HttpError(400, "which message? pass ?message=<id>&chat=<name>")
+        index = _int(query, "index", index)
+        return self._send_attachment(self.service.attachment(chat, message_id, index))
+
+    def h_mention_attachments(self, query, path, mid):
+        m = self.service.store.get(mid)
+        if m is None:
+            raise HttpError(404, "no mention %r" % mid)
+        return self.json({"mention": mid, "attachments": m.get("attachments") or []})
+
+    def h_mention_attachment(self, query, path, mid, index):
+        return self._send_attachment(self.service.mention_attachment(mid, index))
 
 
 class Server(ThreadingHTTPServer):
